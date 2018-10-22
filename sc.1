@@ -1,0 +1,251 @@
+.TH SC 1
+.SH NAME
+sc \- scientific calculator
+.SH SYNOPSIS
+.B sc
+[\fB\-e\fR \fIexpr\fR]
+[\fB\-f\fR \fIfile\fR]
+[\fB\-h\fR]
+[file...]
+.SH DESCRIPTION
+.B sc
+is a reverse-Polish calculator that can do arbitrary precision
+integer and floating point calculations.
+It also has built-in math functions and allows executing macros.
+.SH OPTIONS
+.TP
+.BR \-e " " \fIexpr\fR
+Execute \fIexpr\fR before processing the input.
+.TP
+.BR \-f " " \fIfile\fR
+Execute \fIfile\fR before processing the input.
+If multiple \fB\-e\fR or \fB\-f\fR are given,
+the expressions and files are executed in order.
+.TP
+.B \-h
+Show help.
+.TP
+[\fIfile...\fR]
+Zero or more input files.  They will be executed in order.
+The standard input will be processed if no arguments or
+.B \-e
+options are given.
+.SH Lexical conventions
+.B sc
+operates on a stack.
+To push a number onto the stack,
+use digits \fB0\-9\fR and uppercase letters \fBA\-F\fR.
+Numbers that contain a decimal point (`\fB.\fR')
+or an exponent (`\fBe\fIddd\/\fR' where \fIddd\/\fR is
+a decimal number with an optional sign) are floating point.
+Negative numbers can are preceded by `_' instead of `\-' as the latter
+is a binary operator.
+.PP
+To push a string onto the stack,
+wrap it in brackets, i.e., \fB[the string]\fR.
+A string can be printed or executed.
+A string to be executed is also called a \fImacro\fR.
+.SH Printing commands
+.TP
+.B p
+Print the top of the stack.
+.TP
+.B n
+Print and pop the top of the stack.
+No newline character is appended.
+.TP
+.B P
+Similar, but the value is printed in a special format:
+an integer is interpreted as a byte stream;
+a floating point number is printed with extra digits.
+.SH Operators
+Operators pop numbers from the stack and pushes the result back.
+The result is an integer if the operands are integers, or floating point
+if any is floating point.
+For binary floating point operations, the result is rounded to the
+current precision.
+.TP
+.B +
+Add.
+.TP
+.B \-
+Subtract.
+.TP
+.B *
+Multiply.
+.TP
+.B /
+Divide.
+Integer division is truncated.
+.TP
+.B %
+Modulo.
+.TP
+.B ^
+Power.
+For integer exponentiation, only non-negative exponents are supported.
+.TP
+.B |
+``\fIx y z \fB|\fR'' is the same as ``\fIx y \fB^\fI z \fB%\fR'' but only
+works for integers.  It is more efficient if the exponentiation is large.
+.TP
+.B v
+Square root.
+Integer square root is truncated.
+.SH Math functions
+Math functions are invoked by command \fBm\fIx\fR,
+where \fIx\/\fR is a character and described below.
+The result of a math function is always floating point.
+.TP
+.B s
+Sine.
+.TP
+.B c
+Cosine.
+.TP
+.B a
+Arc tangent.
+.TP
+.B l
+Logarithm (base \fIe\fR).
+.TP
+.B e
+Exponentiation (base \fIe\fR).
+.TP
+.B z
+Zeta function.
+.TP
+.B g
+Gamma function.
+.TP
+.B G
+Logarithm of gamma function.
+.TP
+.B r
+Round to an integer.  It's behavior is affected by the current rounding mode.
+.TP
+.B j
+Bessel function of the first kind.
+Two numbers are popped from the stack;
+the first is an integer order and the second is the argument.
+.TP
+.B y
+Bessel function of the second kind.
+See \fBj\fR.
+.SH Stack manipulation commands
+.TP
+.B c
+Clear the stack.
+.TP
+.B d
+Dupilcate the top of the stack.
+.TP
+.B f
+Print all elements in the stack (from top to bottom).
+.TP
+.B r
+Swap the two elements on the top of the stack.
+.TP
+.B z
+Push the depth of the stack onto the stack.
+.SH Control flow commands
+Usually \fBsc\fR executes commands in the order as they appear in the input.
+However, it can be affected by the commands described in this section.
+.TP
+.B q
+Quit two levels of execution.
+An extra level of execution is introduced when a string is executed
+or the \fB?\fR command is invoked.
+.TP
+.B Q
+Pop a number \fIn\fR from the stack and quit \fIn\fR levels of execution.
+It never quits the last level, though.
+.TP
+.B x
+Pop a string from the stack and execute it.
+.TP
+.B ?
+Execute a line that is read from the standard input.
+.TP
+.B !
+Execute the rest of the line as an external command.
+.TP
+.B #
+Ignore the rest of the line.
+.TP
+.BI < x
+Pop two values from the stack and execute the macro
+.I x\/
+if the first is less than the second.
+.TP
+.BI = x
+Similar, but execute the macro when the two numbers are equal.
+.TP
+.BI > x
+Similar, but execute the macro when the first is greater than the second.
+.SH Register commands
+The values can be stored to or loaded from an register.
+\fBsc\fR has \fIUCHAR_MAX\/\fR registers,
+numbered from 1 to \fIUCHAR_MAX\/\fR + 1.
+The registers can be referred by a character, using its character code.
+.TP
+.BI s x
+Save the top of the stack to register \fIx\fR,
+overwriting its previous value.
+.TP
+.BI S x
+Similar, but the previous value in register \fIx\fR is preserved
+(each register is actually a stack on its own) and can be restored
+by the \fBL\fR command.
+.TP
+.BI l x
+Load the value in register \fIx\fR to the stack.
+The register is unchanged.
+.TP
+.BI L x
+Similar, but the register is restored to its previous value.
+See \fBS\fR.
+.SH Parameter commands
+.BI sc
+has three internal parameters: the input base, the output base,
+the the floating point precision.
+They can be changed or queried by the commands described in this section.
+.TP
+.B i
+Set the input base.
+The input base is initially 10 and must be between 2 and 16.
+Any number in the input will be interpreted as one in the input base,
+unless it is a non-negative single-digit integer,
+in which case it is always interpreted as hexadecimal.
+.TP
+.B I
+Query the input base.
+.TP
+.B o
+Set the output base.
+The output base is initially 10 and must be between 2 and 16.
+.TP
+.B O
+Query the output base.
+.TP
+.B k
+Set the floating point precision (in bits).
+The precision is initially 53.
+The number of digits to be output is no more than
+the logarithm of the precision (in output base),
+unless \fBP\fR is used for printing.
+.TP
+.B K
+Query the precision.
+.TP
+.B u
+Set the current rounding mode.
+Valid rounding modes are:
+0 (nearest, ties to even),
+1 (towards zero),
+2 (towards +infinity),
+3 (towards -infinity),
+4 (away from zero).
+.TP
+.B U
+Query the rounding mode.
