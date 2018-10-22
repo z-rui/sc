@@ -122,7 +122,7 @@ Gamma function.
 Logarithm of gamma function.
 .TP
 .B r
-Round to an integer.  It's behavior is affected by the current rounding mode.
+Round to an integer.  Its behavior is affected by the current rounding mode.
 .TP
 .B j
 Bessel function of the first kind.
@@ -185,9 +185,9 @@ Similar, but execute the macro when the two numbers are equal.
 Similar, but execute the macro when the first is greater than the second.
 .SH Register commands
 The values can be stored to or loaded from an register.
-\fBsc\fR has \fIUCHAR_MAX\/\fR registers,
-numbered from 1 to \fIUCHAR_MAX\/\fR + 1.
-The registers can be referred by a character, using its character code.
+The registers are numbered from 1 to
+.I UCHAR_MAX\/
+and can be referred to by a character, using its character code.
 .TP
 .BI s x
 Save the top of the stack to register \fIx\fR,
@@ -206,10 +206,9 @@ The register is unchanged.
 Similar, but the register is restored to its previous value.
 See \fBS\fR.
 .SH Parameter commands
-.BI sc
-has three internal parameters: the input base, the output base,
-the the floating point precision.
-They can be changed or queried by the commands described in this section.
+The internal parameters in
+.B sc
+can be changed or queried by the commands described in this section.
 .TP
 .B i
 Set the input base.
@@ -244,7 +243,7 @@ Valid rounding modes are:
 0 (nearest, ties to even),
 1 (towards zero),
 2 (towards +infinity),
-3 (towards -infinity),
+3 (towards \-infinity),
 4 (away from zero).
 .TP
 .B U
