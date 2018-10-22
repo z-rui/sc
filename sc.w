@@ -595,7 +595,7 @@ by default, so we need to convert them to uppercase manually by calling
 
 	@<Determine output digits |n|@>;
 	s = mpfr_get_str(NULL, &e, _obase, n, r->u.f, _rnd_mode);
-	@<Determine the length of output@>;
+	len = strlen(s);
 	@<If negative, output and skip the minus sign@>;
 	@<Write digits before decimal point@>;
 	putc('.', f); /* writes the decimal point */
@@ -643,13 +643,6 @@ when read back).  The user may be annoyed if she typed \.{0.2} but found
 	}
 }
 
-@ In normal format, we discard the trailing zeros in the output.
-@<Determine the length of output@>=
-len = strlen(s);
-if (!special)
-	while (s[len-1] == '0')
-		--len;
-
 @ @<If negative...@>=
 if (s[0] == '-') {
 	putc('-', f);
@@ -662,15 +655,19 @@ In this case, we need to place the decimal point at a proper place,
 i.e., after the |e|-th digit.
 
 @<Write digits before...@>=
-if (!special && 0 <= e && (size_t) e <= len) /* don't need an exponent */
+if (!special && !mpfr_zero_p(r->u.f) && 0 <= e && (size_t) e <= len)
+	/* don't need an exponent */
 	for (; e; e--) /* |e| digits before the decimal point */
 		putc(toupper(s[i++]), f);
 else /* need an exponent */
 	putc(s[i++], f); /* only 1 digit before the decimal point */
 
 @ @<Write digits after...@>=
-	while (i < len)
-		putc(toupper(s[i++]), f);
+if (!special)
+	while (s[len-1] == '0')
+		--len; /* remove trailing zeros */
+while (i < len)
+	putc(toupper(s[i++]), f);
 
 @ We use \.{e} to indicate an exponent.
 The exponent is always written in decimal.
