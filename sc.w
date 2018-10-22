@@ -781,6 +781,7 @@ if (ch == '.') {
 @<Read an optional exponent@>=
 if (ch == 'e') {
 	isint = 0;
+	ch = '@@'; /* don't confuse MPFR when |_ibase>10| */
 	@<Add |ch| to |buf|...@>;
 	if (ch == '+' || ch == '-')
 		@<Add |ch| to |buf|...@>;
