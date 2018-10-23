@@ -676,7 +676,7 @@ Note: If we don't need an exponent, |e| was set to zero in
 |@<Write digits before...@>|.
 
 @<Write the exponent...@>=
-	if (e)
+	if (special || e)
 		fprintf(f, "e%ld", (long) (e-1));
 
 @*1 Reading registers.
