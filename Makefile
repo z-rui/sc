@@ -7,7 +7,7 @@ LIBS=-lgmp -lmpfr -lm
 # Optimization level
 CFLAGS+=-Os
 #CFLAGS+=-DNDEBUG
-CFLAGS+=-fwhole-program 
+CFLAGS+=-fwhole-program
 
 # Sanitize
 #CFLAGS+=-fsanitize=address -fsanitize=leak

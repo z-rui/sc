@@ -809,7 +809,7 @@ while (isdigit(ch) || (isxdigit(ch) && isupper(ch)))
 		complain("malformed number %s in base %d\n", buf, _ibase);
 }
 
-@*1 Unary operations.  
+@*1 Unary operations.
 Function |reg_un| performs a type-generic unary operation.
 The top of the stack is the input and will be rewritten with the result.
 
@@ -1005,6 +1005,163 @@ non_numeric:
 	return 0;
 }
 
+@* Arrays.  Many \.{dc} implementations support array operations.
+Arrays are indexed by integers.  The tricky thing is that the dimension of
+an array is not predefined, any the user may use any integer as the index.
+Some implementations limit the indices to be within the range
+$[0, |INT_MAX|]$.  This program will any index representable by an
+|unsigned long|.
+
+We can't preallocate space for arrays; there are too many indices.
+Instead, we can either use a tree or a hash table and only allocate
+for existing indices.
+This program will use a binary search tree for this purpose.
+
+An array is associated to a register. Thus, each array is also a stack.
+
+@c
+struct arr {
+	struct bst {
+		unsigned long k;
+		struct reg *v;
+		struct bst *l, *r;
+	} *root;
+	struct arr *link;
+};
+
+@ Binary search trees has a potential performance issue: imbalance.
+To mitigate that, we implement the top-down splaying algorithm that
+guarantees $\Theta(\log n)$ amortized time for the operations.
+
+For details, see Sleator and Tarjan's paper
+``Self-adjusting binary search trees'' (1985).
+@c
+struct bst *bst_splay(struct bst *n, unsigned long k)
+{
+	struct bst dummy;
+	struct bst *l, *r, *m;
+
+	l = r = &dummy;
+	for (;;)
+		if (k < n->k && (m = n->l)) {
+			if (k < m->k && m->l)
+				@<Rotate right@>;
+			@<Link right@>;
+		} else if (k > n->k && (m = n->r)) {
+			if (k > m->k && m->r)
+				@<Rotate left@>;
+			@<Link left@>;
+		} else
+			break;
+	l->r = n->l;
+	r->l = n->r;
+	n->l = dummy.r;
+	n->r = dummy.l;
+	return n;
+}
+
+@ BST left rotation (infix notation $(xAy)$ denotes a subtree
+with root~$A$, left child~$x$ and right child~$y$).
+
+$$(xA(yBz))\;\longrightarrow\;((xAy)Bz)$$
+@<Rotate left@>=
+{
+	n->r = m->l;
+	m->l = n;
+	n = m;
+}
+
+@ BST right rotation
+$$((xAy)Bz)\;\longrightarrow\;(xA(yBz))$$
+@<Rotate right@>=
+{
+	n->l = m->r;
+	m->r = n;
+	n = m;
+}
+
+@ @<Link left@>=
+l = l->r = n;
+n = n->r;
+
+@ @<Link right@>=
+r = r->l = n;
+n = n->l;
+
+@ Function |arr_push| pushes an array onto the stack.
+@c
+struct arr *arr_push(struct arr *top)
+{
+	struct arr *a;
+
+	a = malloc(sizeof *a);
+	a->root = NULL;
+	a->link = top;
+	return a;
+}
+
+@ Function |arr_pop| pops an array from the stack.
+@c
+struct arr *arr_pop(struct arr *top)
+{
+	struct arr *a;
+	struct bst *n, *r;
+
+	a = top;
+	top = top->link;
+	for (n = a->root; n; n = r) {
+		if (n->l != NULL)
+			n = bst_splay(n, 0);
+		r = n->r;
+		reg_pop(n->v);
+		free(n);
+	}
+	free(a);
+	return top;
+}
+
+@ Function |arr_get| returns a register given an index.
+@c
+struct reg *arr_get(struct arr *a, unsigned long k)
+{
+	struct bst *n;
+
+	if ((n = a->root) == NULL ||
+		(n = a->root = bst_splay(n, k), n->k != k))
+		return NULL;
+	return n->v;
+}
+
+@ Function |bst_set| sets the value at the given index.
+@c
+void arr_set(struct arr *a, unsigned long k, struct reg *v)
+{
+	struct bst *n, *m;
+
+	if ((n = a->root) != NULL && (n = bst_splay(n, k), n->k == k)) {
+		reg_pop(n->v);
+		n->v = v;
+		a->root = n;
+		return;
+	}
+	m = malloc(sizeof *m);
+	checkptr(m);
+	m->k = k;
+	m->v = v;
+	if (n == NULL) {
+		m->l = m->r = NULL;
+	} else if (k < n->k) {
+		m->l = n->l;
+		n->l = NULL;
+		m->r = n;
+	} else if (k > n->k) {
+		m->l = n;
+		m->r = n->r;
+		n->r = NULL;
+	}
+	a->root = m;
+}
+
 @* Interpreter.  The input is interpreted as tokens are read.
 The interpreter can manipulate the stack, the registers, and the token scanner.
 
@@ -1013,7 +1170,7 @@ until no more tokens are available.
 
 @c
 @<Auxiliary functions for the interpreter@>@;
-void interpret(struct lex *l, struct reg *r[])
+void interpret(struct lex *l, struct reg *r[], struct arr *a[])
 {
 	int tok;
 	int i;
@@ -1290,9 +1447,13 @@ case 'S':
 	if ((i = get_reg(l, r, 0)) != -1) {
 		if ((top = r[0]) == NULL)
 			goto stack_empty;
-		r[0] = r[0]->link;
-		top->link = (tok == 'S') ? r[i] :
-			(r[i]) ? reg_pop(r[i]) : NULL;
+		r[0] = top->link;
+		if (tok == 'S') {
+			top->link = r[i];
+			a[i] = arr_push(a[i]);
+		} else {
+			top->link = (r[i]) ? reg_pop(r[i]) : NULL;
+		}
 		r[i] = top;
 	}
 	break;
@@ -1320,6 +1481,7 @@ case 'L':
 		r[i]->link = r[0];
 		r[0] = r[i];
 		r[i] = link;
+		a[i] = arr_pop(a[i]);
 	}
 	break;
 }
@@ -1525,6 +1687,71 @@ case 'y':
 	break;
 }
 
+@*1 Array operations.
+
+The \.{:} and \.{;} commands operate on arrays, using the top
+of the stack as the index~$i$.
+Command \.{:}$x$ saves the second of the stack to $x[i]$;
+command \.{;}$x$ loads $x[i]$ to the stack.
+
+@<Actions...@>+=
+case ':':
+case ';':
+{
+	unsigned long k = 0;
+	int bad_index = 0;
+	struct reg *v;
+
+	if ((i = get_reg(l, r, 0)) == -1)
+		break;
+
+	if (r[0] == NULL)
+		goto stack_empty;
+	switch (r[0]->type) {
+	case REG_Z:
+		if (mpz_fits_ulong_p(r[0]->u.z))
+			k = mpz_get_ui(r[0]->u.z);
+		else
+			bad_index = 1;
+		break;
+	case REG_F:
+		if (mpfr_fits_ulong_p(r[0]->u.f, _rnd_mode))
+			k = mpfr_get_ui(r[0]->u.f, _rnd_mode);
+		else
+			bad_index = 1;
+		break;
+	case REG_S:
+		bad_index = 1;
+		break;
+	}
+	if (!bad_index)
+		k = reg_get_ui(r[0]);
+	else
+		complain("array index must be a non-negative integer\n");
+	r[0] = reg_pop(r[0]);
+	if (a[i] == NULL)
+		a[i] = arr_push(a[i]);
+	if (tok == ':') {
+		if (r[0] == NULL)
+			goto stack_empty;
+		if (!bad_index) {
+			v = r[0];
+			r[0] = r[0]->link;
+			v->link = NULL;
+			arr_set(a[i], k, v);
+		} else {
+			r[0] = reg_pop(r[0]);
+		}
+	} else if (!bad_index) {
+		v = arr_get(a[i], k);
+		if (v)
+			r[0] = reg_dup(r[0], v);
+		else
+			r[0] = reg_push(r[0], REG_Z);
+	}
+	break;
+}
+
 @*1 Parameters.  The parameters in the global state can be changed
 by the commands in this section.
 
@@ -1628,30 +1855,32 @@ then the standard input is read.
 int main(int argc, char *argv[])
 {
 	static struct reg *r[UCHAR_MAX+1];
+	static struct arr *a[UCHAR_MAX+1];
 	int rc = 0;
 	int read_stdin = 1;
+	int i;
 
 	@<Process command line arguments@>;
 
 	if (*argv != NULL)
 		do
-			exec_file(fopen(*argv++, "r"), r);
+			exec_file(fopen(*argv++, "r"), r, a);
 		while (*argv != NULL);
 	else if (read_stdin)
-		exec_file(stdin, r);
+		exec_file(stdin, r, a);
 
-	@<Clean up registers@>;
+	@<Clean up registers and arrays@>;
 	return rc;
 }
 
 @ Function |exec_file| executes a file.
 @<Auxiliary functions for |main|@>=
-void exec_file(FILE *f, struct reg *r[])
+void exec_file(FILE *f, struct reg *r[], struct arr *a[])
 {
 	if (f == NULL)
 		perror(progname);
 	else {
-		interpret(lex_push_file(NULL, f), r);
+		interpret(lex_push_file(NULL, f), r, a);
 		fclose(f);
 	}
 }
@@ -1682,9 +1911,9 @@ case 'f':
 	if (ch == 'e') {
 		read_stdin = 0;
 		len = strlen(arg);
-		interpret(lex_push_str(NULL, memdup(arg, len+1), len), r);
+		interpret(lex_push_str(NULL, memdup(arg, len+1), len), r, a);
 	} else {
-		exec_file(fopen(arg, "r"), r);
+		exec_file(fopen(arg, "r"), r, a);
 	}
 	break;
 }
@@ -1702,12 +1931,12 @@ case 'h':
 		progname);
 	return rc;
 
-@ @<Clean up registers@>=
-{
-	int i;
-	for (i = 0; i <= UCHAR_MAX; i++)
-		while (r[i])
-			r[i] = reg_pop(r[i]);
+@ @<Clean up registers...@>=
+for (i = 0; i <= UCHAR_MAX; i++) {
+	while (r[i])
+		r[i] = reg_pop(r[i]);
+	while (a[i])
+		a[i] = arr_pop(a[i]);
 }
 
 @* Index.
