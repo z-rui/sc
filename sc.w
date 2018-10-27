@@ -39,6 +39,7 @@ installed on your machine, and link against the GMP and MPFR libraries
 @s mpfr_exp_t int
 @s mpfr_prec_t int
 @s mpfr_rnd_t int
+@s mp_limb_t int
 
 @c
 #include <ctype.h>
@@ -99,22 +100,6 @@ void *memdup(void *base, size_t size)
 	return memcpy(p, base, size);
 }
 
-@ A string buffer allows adding characters into it and dynamically expand
-its capacity.  This is useful for reading from input whose length cannot
-be determined beforehand.
-
-@c
-char *buf_add(char *buf, size_t *len, size_t *cap, int c)
-{
-	if (*len == *cap) {
-		*cap *= 2;
-		buf = realloc(buf, *cap);
-		checkptr(buf);
-	}
-	buf[(*len)++] = c;
-	return buf;
-}
-
 @ For error reporting purpose, we convert a character token into the
 string form.  If the character is printable, the string contains
 the character itself and its character code (in octal).
@@ -123,9 +108,9 @@ Otherwise, only the character code is included.
 @c
 const char *tok2str(int tok)
 {
-	static char buf[11];
+	static char buf[20];
 
-	tok &= UCHAR_MAX;
+	assert(0 <= tok && tok <= UCHAR_MAX);
 	if (isprint(tok))
 		sprintf(buf, "'%c' (%#03o)", tok, tok);
 	else
@@ -154,844 +139,225 @@ int _ibase = 10, _obase = 10; /* input/output base */
 mpfr_prec_t _precision = 53; /* floating point precision */
 mpfr_rnd_t _rnd_mode = MPFR_RNDN; /* rounding mode */
 
-@* Token scanner.  The input is scanned into tokens for further processing.
-There are two kinds of tokens:
-\item{$\bullet$} A {\it character token\/} is a literal character in the input.
-\item{$\bullet$} A {\it value token\/} is a sequence of characters that
-represent a (numeric or string) value.
 
-The input comes from two sources:
-\item{$\bullet$} A file (possibly the standard input), for which I should use
-functions from \.{<stdio.h>} for reading.
-\item{$\bullet$} A string (defined macros), for which I should use pointers
-for reading.
+@* Types and values.
+There are three data types in this program:
+\item{$\bullet$} Integers;
+\item{$\bullet$} Floating-point (FP) numbers;
+\item{$\bullet$} Strings;
 
-A token scanner is represented by the |lex| structure.
-Its |size| field serves two purposes: 1) indicating the length of the string
-input (when |size>0|), 2) indicating the input is a file (when |size==0|).
+The values are stored in the |val| structure, which is a reference-counted
+object.  Reference counting helps reduce unnecessary copies while executing
+the program.
 
-(Note: \POSIX/ offers |fmemopen| for creating a |FILE*| given a string;
-it's not used in this program.)
-
-Lastly, the token scanner is actually stacked.  Initially, the program
-is reading from a file. When it starts to execute a macro, a new token
-scanner is pushed onto the stack, and is popped when the macro finishes.
-The |link| field indicates the previous token scanner in the stack.
-
-@d LEX_ISFILE(l) ((l)->len == 0)
-@s lex int
+@s val int
 @c
-struct lex {
-	union {
-		FILE *f;
-		char *s;
-	} u;
-	size_t len; /* not including |'\0'| */
-	struct lex *link; /* to form a stack */
-};
-
-@ Function |lex_push_file| pushes a token scanner that reads from a file.
-@c
-struct lex *lex_push_file(struct lex *top, FILE *f)
-{
-	struct lex *l;
-
-	l = malloc(sizeof *l);
-	checkptr(l);
-	l->u.f = f;
-	l->len = 0;
-	l->link = top;
-	return l;
-}
-
-@ Function |lex_push_str| pushes a token scanner that reads from a string.
-
-If the token scanner has reached the end, we can discard the top before
-pushing the new token scanner.  This enables efficient tail recursion.
-@c
-struct lex *lex_push_str(struct lex *top, char *s, size_t len)
-{
-	struct lex *l;
-
-	if (top && !LEX_ISFILE(top) && !*top->u.s) {
-		l = top;
-		free(l->u.s - l->len);
-	} else {
-		l = malloc(sizeof *l);
-		checkptr(l);
-		l->link = top;
-	}
-	l->u.s = s;
-	l->len = len;
-	return l;
-}
-
-@ Function |lex_pop| drops the last token scanner in the stack
-and releases its memory.
-@c
-struct lex *lex_pop(struct lex *top)
-{
-	struct lex *link;
-
-	assert(top != NULL);
-	link = top->link;
-	if (!LEX_ISFILE(top))
-		free(top->u.s + strlen(top->u.s) - top->len);
-		/* ensures the correct pointer when reading halfway */
-	free(top);
-	return link;
-}
-
-@ Function |lex_getc| a character from the input.
-A null character is invalid, and if read from a file,
-it will be interpreted as end of input.
-
-@c
-static int lex_getc(struct lex *l)
-{
-	int ch;
-
-	if (LEX_ISFILE(l))
-		ch = getc(l->u.f);
-	else if ((ch = *l->u.s) != '\0')
-		++l->u.s; /* don't read pass |'\0'| */
-	return ch ? ch : EOF;
-}
-
-@ Function |lex_ungetc| pushes back a character to the input.
-This is necessary because the token scanner sometimes reads ahead.
-Basically, one should only ``unget'' a single character that has just
-been read.
-
-@c
-static int lex_ungetc(int ch, struct lex *l)
-{
-	if (LEX_ISFILE(l))
-		return ungetc(ch, l->u.f);
-	return *--l->u.s = ch;
-}
-
-@ Function |lex_gettok| reads a token from the input.
-\item{$\bullet$} For a character token, the return value is its character code.
-\item{$\bullet$} For a value token, it returns zero, and the value is pushed
-onto the main stack.
-\item{$\bullet$} In case of end-of-file or end-of-string, it returns |EOF|.
-
-The rules for a value token loosely follows the \.{dc} convention:
-the characters that start a value token are \.{[0-9A-F\_.[]}.
-
-@c
-struct reg *reg_get(struct reg *, struct lex *); /* defined in later sections */
-int lex_gettok(struct lex *l, struct reg **top)
-{
-	int ch;
-
-	switch (ch = lex_getc(l)) {
-	case '0': case '1': case '2': case '3': case '4': @|
-	case '5': case '6': case '7': case '8': case '9': @|
-	case 'A': case 'B': case 'C': case 'D': case 'E': case 'F': @|
-	case '_': case '.': case '[':
-		lex_ungetc(ch, l);
-		*top = reg_get(*top, l);
-		return 0;
-	}
-	return ch;
-}
-
-@* Registers.
-The calculator stores its values in ``registers''.
-Registers hold various things, including: integers, floating point numbers
-and strings.
-
-We define the |reg| structure to represent the register.
-It has a union of different value types, and
-an enumeration indicating the type of the value.
-Many operations on a register will thus requires a type switch.
-
-Lastly, a register is really a stack of registers, we can push multiple
-values onto the register, and pop them out in the reverse order.
-We implement this stack by a singly linked list: the |link| field points
-to the previous frame in the stack.
-
-@s reg int
-@c
-struct reg {
+struct val {
+	size_t refcnt;
+	enum val_type {
+		V_INT, V_FP, V_STR
+	} type;
 	union {
 		mpz_t z;
 		mpfr_t f;
 		struct {
-			size_t len; /* not including the trailing |'\0'| */
+			size_t len; /* excluding trailing |'\0'| */
 			char *ptr;
 		} s;
 	} u;
-	enum reg_type {
-		REG_Z, REG_F, REG_S
-	} type;
-	struct reg *link;
 };
 
-@ Function |reg_push| pushes an new frame onto the register (stack).
-
-When pushing an integer, the value is initialized to zero.
-
-When pushing a floating point number, the third argument is the precision,
-and the value is initialized to NaN (not-a-number).
-
-When pushing a string, the third argument is
-the pointer to the first character,
-and the fourth argument is
-the length of the string (not including |'\0'|).
+@ Function |val_ref| increments the reference count.
+The reference count is only incremented when the value is inserted into
+other structures (stack, array, etc.).
 
 @c
-struct reg *reg_push(struct reg *top, enum reg_type type, ...)
+struct val *val_ref(struct val *v)
 {
-	struct reg *r;
-	va_list ap;
+	++v->refcnt;
+	return v;
+}
 
-	r = malloc(sizeof *r);
-	checkptr(r);
-	va_start(ap, type);
-	switch (r->type = type) {
-	case REG_Z:
-		mpz_init(r->u.z);
+@ Function |val_deref| decrements when removed from
+other strucutres.
+If the only reference to the object is a local (temporary) variable,
+the reference count is zero and the object is considered ``floating''.
+@c
+void val_deref(struct val *v)
+{
+	assert(v->refcnt);
+	--v->refcnt;
+}
+
+@ If the object is potentially floating,
+one must call |val_ckref| before losing reference to that object
+to avoid resources leak.
+
+The convenience macro |val_unref| is provided to perform the checking after
+decrementing the reference count.
+@d val_unref(v) (val_deref(v), val_ckref(v))
+@c
+size_t val_ckref(struct val *v)
+{
+	if (v->refcnt)
+		return v->refcnt;
+
+	switch (v->type) {
+	case V_INT:
+		mpz_clear(v->u.z);
 		break;
-	case REG_F:
-		mpfr_init2(r->u.f, va_arg(ap, mp_prec_t));
+	case V_FP:
+		mpfr_clear(v->u.f);
 		break;
-	case REG_S:
-		r->u.s.ptr = va_arg(ap, char *);
-		r->u.s.len = va_arg(ap, size_t);
+	case V_STR:
+		free(v->u.s.ptr);
 		break;
 	}
-	va_end(ap);
-	r->link = top;
-	return r;
+	free(v);
+	return 0;
 }
 
-@ Function |reg_pop| pops a frame from the register.
-@c
-struct reg *reg_pop(struct reg *top)
-{
-	struct reg *link;
+@ Function |new_val| creates a new value of the given type.
+The value is uninitialized and is initially floating.
 
-	assert(top != NULL);
-	link = top->link;
-	switch (top->type) {
-	case REG_Z:
-		mpz_clear(top->u.z);
-		break;
-	case REG_F:
-		mpfr_clear(top->u.f);
-		break;
-	case REG_S:
-		free(top->u.s.ptr);
-		break;
+@c
+struct val *new_val(enum val_type type)
+{
+	struct val *v;
+
+	v = malloc(sizeof *v);
+	checkptr(v);
+	v->refcnt = 0;
+	v->type = type;
+	return v;
+}
+
+@ Function |new_int| creates an initialized integer value.
+@c
+struct val *new_int(void)
+{
+	struct val *v;
+
+	v = new_val(V_INT);
+	mpz_init(v->u.z);
+	return v;
+}
+
+@ Function |new_fp| creates an initialized floating point value.
+@c
+struct val *new_fp(mpfr_prec_t prec)
+{
+	struct val *v;
+
+	v = new_val(V_FP);
+	mpfr_init2(v->u.f, _precision);
+	return v;
+}
+
+@ Function |new_str| creates a string value initialized to the given string.
+The ownership is transferred.
+@c
+struct val *new_str(char *s, size_t len)
+{
+	struct val *v;
+
+	v = new_val(V_STR);
+	v->u.s.ptr = s;
+	v->u.s.len = len;
+	return v;
+}
+
+@*1 Conversions.
+Function |val_to_ui| converts the value to an |unsigned long|.
+The return value indicates whether the operation succeeded.
+
+@c
+int val_to_ui(struct val *v, unsigned long *x)
+{
+	switch (v->type) {
+	case V_INT:
+		*x = mpz_get_ui(v->u.z);
+		return mpz_fits_ulong_p(v->u.z);
+	case V_FP:
+		*x = mpfr_get_ui(v->u.f, _rnd_mode);
+		return mpfr_fits_ulong_p(v->u.f, _rnd_mode);
+	default:
+		complain("non-numeric value\n");
+		*x = 0;
+		return 0;
 	}
-	free(top);
-	return link;
 }
 
-@ Function |reg_dup| makes a copy of a register (the top value on the stack)
-and pushes this value to to another register.
+@ Similarly, function |val_to_si| converts the value to a |long|.
 @c
-struct reg *reg_dup(struct reg *dst, struct reg *src)
+int val_to_si(struct val *v, long *x)
 {
-	switch (src->type) {
-	case REG_Z:
-		dst = reg_push(dst, REG_Z);
-		mpz_set(dst->u.z, src->u.z);
-		break;
-	case REG_F:
-		dst = reg_push(dst, REG_F, mpfr_get_prec(src->u.f));
-		mpfr_set(dst->u.f, src->u.f, _rnd_mode);
-		break;
-	case REG_S:
-		dst = reg_push(dst, REG_S,
-			memdup(src->u.s.ptr, src->u.s.len + 1),
-			src->u.s.len);
-		break;
+	switch (v->type) {
+	case V_INT:
+		*x = mpz_get_si(v->u.z);
+		return mpz_fits_slong_p(v->u.z);
+	case V_FP:
+		*x = mpfr_get_si(v->u.f, _rnd_mode);
+		return mpfr_fits_slong_p(v->u.f, _rnd_mode);
+	default:
+		complain("non-numeric value\n");
+		*x = 0;
+		return 0;
 	}
-	return dst;
 }
 
-@ Function |reg_rot| swaps the register with its previous value.
+@ Function |val_to_fp| converts the register to floating point.
+It is used when the operands have different types.
+
 @c
-struct reg *reg_rot(struct reg *top)
-{
-	struct reg *link;
-
-	assert(top != NULL);
-	link = top->link;
-	assert(link != NULL);
-	top->link = link->link;
-	link->link = top;
-	return link;
-}
-
-@ Function |reg_conv| converts the register to another type.
-It is used when the operands have different types, e.g.,
-when we want to divide an integer by a floating point number,
-we first convert the integer to floating point, and then
-perform the calculation.
-
-Currently, the only allowed type to convert to is |REG_F|.
-@c
-void reg_conv(struct reg *r, enum reg_type type)
+struct val *val_to_fp(struct val *v)
 {
 	mpfr_t f;
 
-	switch (type) {
-	case REG_F:
-		switch (r->type) {
-		case REG_Z:
-			mpfr_init2(f, _precision);
-			mpfr_set_z(f, r->u.z, _rnd_mode);
-			mpz_clear(r->u.z);
-			memcpy(r->u.f, f, sizeof f);
-			r->type = REG_F;
-		case REG_F:
-			break;
-		default:
-			goto no_conv;
+	switch (v->type) {
+	case V_INT:
+		mpfr_init2(f, _precision);
+		mpfr_set_z(f, v->u.z, _rnd_mode);
+		if (v->refcnt) {
+			v = new_val(V_FP);
+		} else {
+			mpz_clear(v->u.z);
+			v->type = V_FP;
 		}
+		memcpy(v->u.f, f, sizeof f);
+	case V_FP:
 		break;
 	default:
-no_conv:
-		assert(0 && "cannot convert");
-		break;
+		return NULL;
 	}
+	return v;
 }
 
-@ Function |reg_get_ui| converts the value in the register to
-an |unsigned long|.
-@c
-unsigned long reg_get_ui(struct reg *r)
-{
-	switch (r->type) {
-	case REG_Z:
-		return mpz_get_ui(r->u.z);
-	case REG_F:
-		return mpfr_get_ui(r->u.f, _rnd_mode);
-	default:
-		complain("non-numeric value\n");
-		break;
-	}
-	return 0;
-}
-
-@ Function |reg_get_si| converts the value in the register to a |long|.
-It complains if the value cannot fit in a |long|.
-@c
-long reg_get_si(struct reg *r)
-{
-	switch (r->type) {
-	case REG_Z:
-		if (!mpz_fits_slong_p(r->u.z))
-			complain("invalid integer value\n");
-		return mpz_get_si(r->u.z);
-	case REG_F:
-		if (!mpfr_fits_slong_p(r->u.f, _rnd_mode))
-			complain("invalid integer value\n");
-		return mpfr_get_si(r->u.f, _rnd_mode);
-	default:
-		complain("non-numeric value\n");
-		break;
-	}
-	return 0;
-}
-
-@*1 Writing registers.
-Function |reg_put| writes the register to a file.
-
-When |special=1|, it writes in a different format
-(for use with the \.{P} command).
-\item{$\bullet$} For an integer, it interprets it as a sequence of bytes
-and outputs the strings;
-\item{$\bullet$} For a floating point number, it prints it in MPFR's
-default format (lowercase letters, always with exponents, and with enough
-digits to be read back exactly).
-
-@c
-void reg_put(struct reg *r, FILE *f, int special)
-{
-	switch (r->type) {
-	case REG_Z:
-		@<Write an integer value@>;
-		break;
-	case REG_F:
-		@<Write a floating point value@>;
-		break;
-	case REG_S:
-		fputs(r->u.s.ptr, f);
-		break;
-	}
-}
-
-@ Writing an integer is easy: |mpz_out_str| does the job.
-Function |mpz_out_str| will use uppercase letters if base is negative.
-
-@<Write an integer value@>=
-if (!special)
-	mpz_out_str(f, -_obase, r->u.z);
-else
-	@<Write an integer in special format@>;
-
-@ If writing in the special format, we need to find the byte stream
-in the ``limbs'' in a |mpz_t| variable, and print them as characters.
-
-@<Write an integer in special format@>=
-{
-	size_t n;
-
-	if ((n = mpz_size(r->u.z)) == 0)
-		putchar('\0');
-	else {
-		const mp_limb_t *limbs;
-		int i;
-
-		limbs = mpz_limbs_read(r->u.z);
-
-#define LIMB_BYTE (limbs[n-1] >> ((i-1)*CHAR_BIT))
-		for (i = sizeof (mp_limb_t); i && LIMB_BYTE == 0; i--)
-			;
-		for (; i; i--)
-			putc(LIMB_BYTE & UCHAR_MAX, f);
-		while (--n)
-			for (i = sizeof (mp_limb_t); i; i--)
-				putc(LIMB_BYTE & UCHAR_MAX, f);
-#undef LIMB_BYTE
-	}
-}
-
-@ Writing a floating point number is tricky.
-First, there are special values (0, $\pm\infty$ or NaN).
-Second, (for normal values,) we need to determine how many digits to output.
-Finally, we need to write the decimal point and the exponent properlly.
-
-@<Write a floating point...@>=
-{
-	if (!mpfr_number_p(r->u.f))
-		@<Write a special floating point value@>@;
-	else
-		@<Write a normal floating point value@>;
-}
-
-@ We call |mpfr_out_str| directly for special values.  They will show up
-as \.{@@Inf@@}, \.{-@@Inf@@} or \.{@@NaN@@}.
-@<Write a special...@>=
-mpfr_out_str(f, _obase, 0, r->u.f, _rnd_mode);
-
-@ When writing a normal number, we call |mpfr_get_str| as it gives more
-flexibility: we can omit the exponent if it is unnecessary.
-However, MPFR does not support a negative base and uses lowercase letters
-by default, so we need to convert them to uppercase manually by calling
-|toupper|.
-
-@<Write a normal...@>=
-{
-	size_t n, len, i = 0;
-	char *s;
-	mpfr_exp_t e;
-
-	@<Determine output digits |n|@>;
-	s = mpfr_get_str(NULL, &e, _obase, n, r->u.f, _rnd_mode);
-	len = strlen(s);
-	@<If negative, output and skip the minus sign@>;
-	@<Write digits before decimal point@>;
-	putc('.', f); /* writes the decimal point */
-	@<Write digits after decimal point@>;
-	@<Write the exponent if necessary@>;
-	mpfr_free_str(s);
-}
-
-@ For a $k$-bit floating point, we output $\lfloor k \log_b 2 \rfloor$ digits
-in base~$b$.  The printed result is exact if $k=2$.
-
-If writing in the special format, we will set $n=0$ and let MPFR determine
-how many digits to write.
-It usually writes too many digits (because it ensures exact result
-when read back).  The user may be annoyed if she typed \.{0.2} but found
-\.{0.1999...} on the stack.
-
-@<Determine output digits |n|@>=
-{
-	static const double M[] = {
-		.63092975357145743710,
-		.50000000000000000000,
-		.43067655807339305067,
-		.38685280723454158687,
-		.35620718710802217651,
-		.33333333333333333333,
-		.31546487678572871855,
-		.30102999566398119521,
-		.28906482631788785927,
-		.27894294565112984319,
-		.27023815442731974129,
-		.26264953503719354798,
-		.25595802480981548939,
-		.25000000000000000000
-	}; /* |M[i]|${}=1/\log_2(i+3)$ */
-
-	if (special)
-		n = 0; /* let MPFR decide */
-	else {
-		n = mpfr_get_prec(r->u.f);
-		if (_obase > 2)
-			n *= M[_obase - 3];
-		if (n == 0)
-			n = 1; /* must output at least one digit! */
-	}
-}
-
-@ @<If negative...@>=
-if (s[0] == '-') {
-	putc('-', f);
-	++i;
-	--len;
-}
-
-@ We will omit the exponent if |e| is between 0 and |len|.
-In this case, we need to place the decimal point at a proper place,
-i.e., after the |e|-th digit.
-
-@<Write digits before...@>=
-if (!special && !mpfr_zero_p(r->u.f) && 0 <= e && (size_t) e <= len)
-	/* don't need an exponent */
-	for (; e; e--) /* |e| digits before the decimal point */
-		putc(toupper(s[i++]), f);
-else /* need an exponent */
-	putc(s[i++], f); /* only 1 digit before the decimal point */
-
-@ @<Write digits after...@>=
-if (!special)
-	while (s[len-1] == '0')
-		--len; /* remove trailing zeros */
-while (i < len)
-	putc(toupper(s[i++]), f);
-
-@ We use \.{e} to indicate an exponent.
-The exponent is always written in decimal.
-
-Note: If we don't need an exponent, |e| was set to zero in
-|@<Write digits before...@>|.
-
-@<Write the exponent...@>=
-	if (special || e)
-		fprintf(f, "e%ld", (long) (e-1));
-
-@*1 Reading registers.
-As pointed out in the ``Token scanner'' section, the input comes from
-two sources.  Therefore, we need the token scanner to read into a register.
-
-A buffer is used here for input with unknown length.
-
-@c
-struct reg *reg_get(struct reg *r, struct lex *l)
-{
-	char *buf;
-	size_t len = 0, cap = 8;
-	int ch;
-
-	buf = malloc(cap);
-	checkptr(buf);
-	ch = lex_getc(l);
-	if (ch == '[')
-		@<Read a string token@>@;
-	else
-		@<Read a numeric token@>;
-	return r;
-}
-
-@ A string token is a character sequenced enclosed by a balanced pair of
-brackets.  It's unfortunate that there is no escaping so one cannot have
-a string containing unbalanced brackets. (Bad for the user, good for the
-implementer, though.)
-
-@<Read a string token@>=
-{
-	int balance = 1;
-
-	for (;;) {
-		ch = lex_getc(l);
-		switch (ch) {
-		case '[': ++balance; break;
-		case ']': --balance; break;
-		case EOF: balance = 0;
-			complain("unbalanced []\n");
-			break;
-		}
-		if (balance == 0)
-			break;
-		buf = buf_add(buf, &len, &cap, ch);
-	}
-	@<Terminate the buffer@>;
-	r = reg_push(r, REG_S, buf, len);
-}
-
-@ @<Terminate the buffer@>=
-buf = realloc(buf, len+1);
-checkptr(buf);
-buf[len] = '\0';
-
-@ A numeric token contains an optional \.{\_} (negative sign),
-followed by a sequence of hexadecimal digits with an optional decimal point.
-This is the \.{dc} convention.  The extension here is to allow an optional
-expoent in the end, indicated by character \.{e} or \.{@@}.
-
-Note: \.{dc} allowed all of \.{[0-9A-F]} to be valid digits in any base.
-GMP and MPFR do not allow this, so here is the compromise:
-\item{$\bullet$} Any one-digit number is a hexadecimal integer, no matter
-what the current input base is.
-\item{$\bullet$} In any other case, the input digits must contains digits
-that are meaningful in the input base; otherwise the program will complain.
-
-@<Read a numeric token@>=
-{
-	int isint = 1;
-
-	@<Read an optional negative sign@>;
-	@<Scan hexdigit sequence@>;
-	@<Read an optional fractional part@>;
-	@<Read an optional exponent@>;
-	lex_ungetc(ch, l); /* push back the read-ahead */
-	@<Terminate the buffer@>;
-	@<Push the numeric value onto the stack@>;
-	free(buf);
-}
-
-@ We use \.{\_} for negative sign, but GMP and MPFR use \.{-}.
-@<Read an optional negative sign@>=
-if (ch == '_') {
-	ch = '-';
-	@<Add |ch| to |buf| and get next |ch|@>;
-}
-
-@ If we see a decimal point, a fractional part follows.
-@<Read an optional fractional part@>=
-if (ch == '.') {
-	isint = 0;
-	@<Add |ch| to |buf|...@>;
-	@<Scan hexdigit sequence@>;
-}
-
-@ If we see an \.{e}, an exponent follows.
-@<Read an optional exponent@>=
-if (ch == 'e') {
-	isint = 0;
-	ch = '@@'; /* don't confuse MPFR when |_ibase>10| */
-	@<Add |ch| to |buf|...@>;
-	if (ch == '+' || ch == '-')
-		@<Add |ch| to |buf|...@>;
-	@<Scan hexdigit sequence@>;
-}
-
-@ @<Scan hexdigit sequence@>=
-while (isdigit(ch) || (isxdigit(ch) && isupper(ch)))
-	@<Add |ch| to |buf|...@>;
-
-@ @<Add |ch| to |buf|...@>=
-{
-	buf = buf_add(buf, &len, &cap, ch);
-	ch = lex_getc(l);
-}
-
-@ @<Push the numeric value...@>=
-{
-	int rc;
-	if (isint) {
-		r = reg_push(r, REG_Z);
-		rc = mpz_set_str(r->u.z, buf, (len == 1) ? 16 : _ibase);
-	} else {
-		r = reg_push(r, REG_F, _precision);
-		rc = mpfr_set_str(r->u.f, buf, _ibase, _rnd_mode);
-	}
-	if (rc == -1)
-		complain("malformed number %s in base %d\n", buf, _ibase);
-}
-
-@*1 Unary operations.
-Function |reg_un| performs a type-generic unary operation.
-The top of the stack is the input and will be rewritten with the result.
-
-@c
-struct reg *reg_un(struct reg *r,
-	@|void @[(*fz)@](mpz_t, const mpz_t),
-	@|int @[(*ff)@](mpfr_t, const mpfr_t, mpfr_rnd_t))
-{
-	if (r == NULL) {
-		complain("stack empty\n");
-		return r;
-	}
-	switch (r->type) {
-	case REG_Z:
-		if (fz != NULL) {
-			(*fz)(r->u.z, r->u.z);
-			break;
-		}
-		reg_conv(r, REG_F);
-		/* fall through */
-	case REG_F:
-		if (ff == NULL)
-			complain("operation not supported\n");
-		else
-			(*ff)(r->u.f, r->u.f, _rnd_mode);
-		break;
-	default:
-		complain("non-numeric value\n");
-		break;
-	}
-	return r;
-}
-
-@*1 Binary operations.
-This program implements the binary operations from \.{dc}
-as well as some extensions.
-When executed, two values are popped from the stack, and the result
-is pushed back.
-
-Function |reg_bin| performs a type-generic binary operation.
-Two values are popped from the stack and the result is pushed back.
-
-When two operands have different types, we will try to match them with
-mixed-type functions that exists in GMP and MPFR.
-If such functions are not available, we convert them to a common type
-(|REG_F|), and then perform the calculation.
-
-@c
-struct reg *reg_bin(struct reg *r,
-	@|void @[(*fzz)@](mpz_t, const mpz_t, const mpz_t),
-	@|int @[(*fzf)@](mpfr_t, const mpfr_t, const mpz_t, mpfr_rnd_t),
-	@|int @[(*ffz)@](mpfr_t, const mpfr_t, const mpz_t, mpfr_rnd_t),
-	@|int @[(*fff)@](mpfr_t, const mpfr_t, const mpfr_t, mpfr_rnd_t))
-{
-	struct reg *l;
-	mpfr_t tmp;
-
-	if (r == NULL || (l = r->link) == NULL) {
-		complain("stack empty\n");
-		return r;
-	}
-reswitch:
-	switch (l->type) {
-	case REG_Z:
-		switch (r->type) {
-		case REG_Z:
-			@<Binary operations on integers@>;
-			break;
-		case REG_F:
-			@<Binary operations on integer and floating point@>;
-			break;
-		default:
-			goto non_numeric;
-		}
-
-		break;
-	case REG_F:
-		switch (r->type) {
-		case REG_Z:
-			@<Binary operations on floating point and integer@>;
-			break;
-		case REG_F:
-			@<Binary operations on floating points@>;
-			break;
-		default:
-			goto non_numeric;
-		}
-		break;
-	default:
-non_numeric:
-		complain("non_numeric value\n");
-		return r;
-	}
-	return reg_pop(r);
-not_supported:
-	complain("operation not supported\n");
-	return r;
-}
-
-@ When two operands are integer, call {\it mpz\_*} functions.
-
-We can reuse |l| for the result.
-
-@<Binary operations on integers@>=
-if (fzz == NULL)
-	goto not_supported;
-(*fzz)(l->u.z, l->u.z, r->u.z);
-
-@ When |l| is integer and |r| is floating point
-and a symmetric function is available,
-swap |l| and |r| and reduce to the symmetric case.
-
-Otherwise, convert |l| to floating point and retry;
-
-@<Binary operations on integer and floating point@>=
-{
-	if (fzf == NULL)
-		reg_conv(l, REG_F);
-	else {
-		r = reg_rot(r);
-		assert(l == r);
-		l = r->link;
-		ffz = fzf;
-	}
-	goto reswitch;
-}
-
-@ When |l| is floating point and |r| is integer, try
-{\it mpfr\_*\_z} functions.
-If no function is available, convert |r| to floating point and retry.
-
-We can reuse |l| for the result.  However, we should always create
-a new |mpfr_t| value because the precision may differ.
-
-@<Binary operations on floating point and integer@>=
-if (ffz == NULL) {
-	reg_conv(r, REG_F);
-	goto reswitch;
-}
-mpfr_init2(tmp, _precision);
-(*ffz)(tmp, l->u.f, r->u.z, _rnd_mode);
-goto tmp_swap_clear;
-
-@ When two operands are floating point, call {\it mpfr\_*} functions.
-
-@<Binary operations on floating points@>=
-if (fff == NULL)
-	goto not_supported;
-mpfr_init2(tmp, _precision);
-(*fff)(tmp, l->u.f, r->u.f, _rnd_mode);
-tmp_swap_clear:
-mpfr_swap(tmp, l->u.f);
-mpfr_clear(tmp);
-
-
-@*1 Comparisons.  Comparizons are similar to binary operations except
-that no values are popped or pushed.
-
-Function |reg_cmp| performs a comparison.
+@*1 Comparisons.
+Function |val_cmp| performs a comparison.
 The return value has the same sign as the expression $l-r$.
 If one of the operand is a string or NaN, the return value is zero.
 
 @c
-int reg_cmp(struct reg *l, struct reg *r)
+int val_cmp(struct val *l, struct val *r)
 {
 	assert(l != NULL && r != NULL);
 	switch (l->type) {
-	case REG_Z:
+	case V_INT:
 		switch (r->type) {
-		case REG_Z:
+		case V_INT:
 			return mpz_cmp(l->u.z, r->u.z);
-		case REG_F:
+		case V_FP:
 			return -mpfr_cmp_z(r->u.f, l->u.z);
 		default:
 			goto non_numeric;
 		}
 		break;
-	case REG_F:
+	case V_FP:
 		switch (r->type) {
-		case REG_Z:
+		case V_INT:
 			return mpfr_cmp_z(l->u.f, r->u.z);
-		case REG_F:
+		case V_FP:
 			return mpfr_cmp(l->u.f, r->u.f);
 		default:
 			goto non_numeric;
@@ -1005,29 +371,182 @@ non_numeric:
 	return 0;
 }
 
+
+@*1 Operations.
+We can perform operations on values.
+The tricky part is that values may have different types, and we
+must handle all possible cases.
+
+@ Function |val_un| performs a type-generic unary operation.
+It returns a pointer to a |val| object, reusing the input
+argument if possible (i.e., if that object is floating).
+
+For floating point operations, the result precision is the same as the
+input precision.
+(This is probably a bug: it's inconsistent with binary operations.)
+
+@c
+struct val *val_un(struct val *v,
+	@|void @[(*fz)@](mpz_t, const mpz_t),
+	@|int @[(*ff)@](mpfr_t, const mpfr_t, mpfr_rnd_t))
+{
+	struct val *u = 0;
+
+	assert(v != NULL);
+	switch (v->type) {
+	case V_INT:
+		if (fz != NULL) {
+			u = v->refcnt ? new_int() : v;
+			(*fz)(u->u.z, v->u.z);
+			break;
+		}
+		v = val_to_fp(v);
+		/* fall through */
+	case V_FP:
+		if (ff != NULL) {
+			u = v->refcnt ? new_fp(mpfr_get_prec(v->u.f)) : v;
+			(*ff)(u->u.f, v->u.f, _rnd_mode);
+		} else
+			complain("operation not supported\n");
+		break;
+	default:
+		complain("non-numeric value\n");
+		break;
+	}
+	return u;
+}
+
+
+@ Function |val_bin| performs a type-generic binary operation.
+
+Handling mixed-type arguments is tricky:
+we can make use of the mixed-type functions in GMP and MPFR libraries
+(e.g., |mpfr_add_z|) when possible;
+otherwise, convert both to floating point and then perform the calculation.
+
+@c
+struct val *val_bin(struct val *l, struct val *r,
+	@|void @[(*fzz)@](mpz_t, const mpz_t, const mpz_t),
+	@|int @[(*fzf)@](mpfr_t, const mpfr_t, const mpz_t, mpfr_rnd_t),
+	@|int @[(*ffz)@](mpfr_t, const mpfr_t, const mpz_t, mpfr_rnd_t),
+	@|int @[(*fff)@](mpfr_t, const mpfr_t, const mpfr_t, mpfr_rnd_t))
+{
+	struct val *u = NULL;
+
+	assert(l != NULL && r != NULL);
+reswitch:
+	switch (l->type) {
+	case V_INT:
+		switch (r->type) {
+		case V_INT:
+			@<Binary operations on integers@>;
+			break;
+		case V_FP:
+			@<Binary operations on integer and floating point@>;
+			break;
+		default:
+			goto non_numeric;
+		}
+
+		break;
+	case V_FP:
+		switch (r->type) {
+		case V_INT:
+			@<Binary operations on floating point and integer@>;
+			break;
+		case V_FP:
+			@<Binary operations on floating points@>;
+			break;
+		default:
+			goto non_numeric;
+		}
+		break;
+	default:
+non_numeric:
+		complain("non_numeric value\n");
+		return NULL;
+	}
+	return u;
+not_supported:
+	complain("operation not supported\n");
+	return NULL;
+}
+
+@ When two operands are integer, call {\it mpz\_*} functions.
+
+We reuse the operand for the result if possible.
+
+@<Binary operations on integers@>=
+if (fzz == NULL)
+	goto not_supported;
+u = (l->refcnt == 0) ? l : (r->refcnt == 0) ? r : new_int();
+(*fzz)(u->u.z, l->u.z, r->u.z);
+
+@ When |l| is integer and |r| is floating point
+and a symmetric function is available,
+swap |l| and |r| and reduce to the symmetric case.
+
+Otherwise, convert |l| to floating point and retry;
+Because the conversion may create a new floating object,
+we must use it for the output.
+
+@<Binary operations on integer and floating point@>=
+{
+	if (fzf == NULL)
+		u = l = val_to_fp(l);
+	else {
+		struct val *tmp;
+
+		tmp = l;
+		l = r;
+		r = tmp;
+		ffz = fzf;
+	}
+	goto reswitch;
+}
+
+@ When |l| is floating point and |r| is integer, try
+{\it mpfr\_*\_z} functions.
+If no function is available, convert |r| to floating point and retry.
+
+We can reuse |l| for the result as long as the its precision matches
+the current precision.  Otherwise, we create a new floating point value.
+
+@d CAN_REUSE_FP(v) ((v)->refcnt == 0 && mpfr_get_prec((v)->u.f) == _precision)
+@<Binary operations on floating point and integer@>=
+if (ffz == NULL) {
+	u = r = val_to_fp(r);
+	goto reswitch;
+}
+assert(u == NULL);
+u = CAN_REUSE_FP(l) ? l : new_fp(_precision);
+(*ffz)(u->u.f, l->u.f, r->u.z, _rnd_mode);
+
+@ When two operands are floating point, call {\it mpfr\_*} functions.
+
+@<Binary operations on floating points@>=
+if (fff == NULL)
+	goto not_supported;
+if (u == NULL)
+	u = CAN_REUSE_FP(l) ? l : CAN_REUSE_FP(r) ? r : new_fp(_precision);
+(*fff)(u->u.f, l->u.f, r->u.f, _rnd_mode);
+
+
 @* Arrays.  Many \.{dc} implementations support array operations.
 Arrays are indexed by integers.  The tricky thing is that the dimension of
 an array is not predefined, any the user may use any integer as the index.
-Some implementations limit the indices to be within the range
-$[0, |INT_MAX|]$.  This program will any index representable by an
-|unsigned long|.
+This program supports any index within the range $[0,\.{ULONG\_MAX}]$.
 
-We can't preallocate space for arrays; there are too many indices.
-Instead, we can either use a tree or a hash table and only allocate
-for existing indices.
-This program will use a binary search tree for this purpose.
-
-An array is associated to a register. Thus, each array is also a stack.
+We can't preallocate space for arrays; there are too many possible indices.
+Instead, this program will use a binary search tree to store all the indices
+and values.
 
 @c
-struct arr {
-	struct bst {
-		unsigned long k;
-		struct reg *v;
-		struct bst *l, *r;
-	} *root;
-	struct arr *link;
-};
+struct bst {
+	unsigned long k;
+	struct val *v;
+	struct bst *l, *r;
+} *root;
 
 @ Binary search trees has a potential performance issue: imbalance.
 To mitigate that, we implement the top-down splaying algorithm that
@@ -1043,12 +562,12 @@ struct bst *bst_splay(struct bst *n, unsigned long k)
 
 	l = r = &dummy;
 	for (;;)
-		if (k < n->k && (m = n->l)) {
-			if (k < m->k && m->l)
+		if (k < n->k && (m = n->l) != NULL) {
+			if (k < m->k && m->l != NULL)
 				@<Rotate right@>;
 			@<Link right@>;
-		} else if (k > n->k && (m = n->r)) {
-			if (k > m->k && m->r)
+		} else if (k > n->k && (m = n->r) != NULL) {
+			if (k > m->k && m->r != NULL)
 				@<Rotate left@>;
 			@<Link left@>;
 		} else
@@ -1088,107 +607,709 @@ n = n->r;
 r = r->l = n;
 n = n->l;
 
-@ Function |arr_push| pushes an array onto the stack.
+@ Function |bst_get| returns a value given an index.
 @c
-struct arr *arr_push(struct arr *top)
+struct bst *bst_get(struct bst *n, unsigned long k, struct val **ptr)
 {
-	struct arr *a;
-
-	a = malloc(sizeof *a);
-	a->root = NULL;
-	a->link = top;
-	return a;
+	if (n == NULL || (n = bst_splay(n, k), n->k != k))
+		*ptr = NULL;
+	else
+		*ptr = n->v;
+	return n;
 }
 
-@ Function |arr_pop| pops an array from the stack.
+@ Function |bst_set| sets the value (and increments its reference count)
+at the given index.
 @c
-struct arr *arr_pop(struct arr *top)
+struct bst *bst_set(struct bst *n, unsigned long k, struct val *v)
 {
-	struct arr *a;
-	struct bst *n, *r;
+	struct bst *m;
 
-	a = top;
-	top = top->link;
-	for (n = a->root; n; n = r) {
-		if (n->l != NULL)
+	if (n != NULL && (n = bst_splay(n, k), n->k == k)) {
+		val_unref(n->v);
+		if (v == NULL) {
+			if (n->l == NULL)
+				m = n->r;
+			else if (n->r == NULL)
+				m = n->l;
+			else {
+				m = n->r = bst_splay(n->r, 0);
+				assert(m->l == NULL);
+				m->l = n->l;
+			}
+			free(n);
+			return m;
+		}
+		n->v = val_ref(v);
+		return n;
+	} else if (v != NULL) {
+		m = malloc(sizeof *m);
+		checkptr(m);
+		m->k = k;
+		m->v = val_ref(v);
+		if (n == NULL)
+			m->l = m->r = NULL;
+		else if (k < n->k) {
+			m->l = n->l;
+			n->l = NULL;
+			m->r = n;
+		} else if (k > n->k) {
+			m->l = n;
+			m->r = n->r;
+			n->r = NULL;
+		}
+		return m;
+	}
+	return n;
+}
+
+@ Function |bst_clr| releases the entire tree.
+@c
+void bst_clr(struct bst *n)
+{
+	struct bst *m;
+
+	while (n) {
+		if (n->l == NULL)
+			m = n->r;
+		else if (n->r == NULL)
+			m = n->l;
+		else {
 			n = bst_splay(n, 0);
-		r = n->r;
-		reg_pop(n->v);
+			m = n->r;
+		}
+		val_unref(n->v);
 		free(n);
+		n = m;
 	}
-	free(a);
-	return top;
 }
 
-@ Function |arr_get| returns a register given an index.
+
+@* Stacks and registers.
+This program operates on a stack and several ``registers''.
+A register is really just a stack but with a name associated to it.
+We will use the |stk| structure to represent a stack.
+
+@s stk int
+@d stk_top(s, i) ((s)->v[(s)->size-(i)])
 @c
-struct reg *arr_get(struct arr *a, unsigned long k)
-{
-	struct bst *n;
+struct stk {
+	struct val **v; /* values */
+	struct bst **a; /* associated arrays */
+	size_t size, cap;
+};
 
-	if ((n = a->root) == NULL ||
-		(n = a->root = bst_splay(n, k), n->k != k))
-		return NULL;
-	return n->v;
-}
-
-@ Function |bst_set| sets the value at the given index.
+@ Function |stk_res| resizes the capacity of the stack.
+It is used by |stk_push| and |stk_pop| to dynamically adjust the memory
+the stack uses.
 @c
-void arr_set(struct arr *a, unsigned long k, struct reg *v)
+void stk_res(struct stk *s, size_t cap)
 {
-	struct bst *n, *m;
-
-	if ((n = a->root) != NULL && (n = bst_splay(n, k), n->k == k)) {
-		reg_pop(n->v);
-		n->v = v;
-		a->root = n;
-		return;
-	}
-	m = malloc(sizeof *m);
-	checkptr(m);
-	m->k = k;
-	m->v = v;
-	if (n == NULL) {
-		m->l = m->r = NULL;
-	} else if (k < n->k) {
-		m->l = n->l;
-		n->l = NULL;
-		m->r = n;
-	} else if (k > n->k) {
-		m->l = n;
-		m->r = n->r;
-		n->r = NULL;
-	}
-	a->root = m;
+	if (cap == 0)
+		cap = 1;
+	assert(cap >= s->size);
+	s->v = realloc(s->v, sizeof (*s->v) * cap);
+	checkptr(s->v);
+	s->a = realloc(s->a, sizeof (*s->a) * cap);
+	checkptr(s->a);
+	s->cap = cap;
 }
+
+@ Function |stk_push| pushes a value onto the stack and increments
+its reference count.
+
+@c
+void stk_push(struct stk *s, struct val *v)
+{
+	assert(v != NULL);
+	if (s->size == s->cap)
+		stk_res(s, s->cap * 2);
+	s->v[s->size] = val_ref(v);
+	s->a[s->size] = NULL; /* a new array level is introduced */
+	++s->size;
+}
+
+@ Function |stk_pop| pops a value from the stack and decrements
+its reference count.  The popped value may be floating.
+
+Note, in a rare case, the top of the stack may be NULL: when the array part
+is initialized but no value has been saved into the register.
+It won't happen with the main stack: the main stack does not have arrays
+stored in it, but we must be extremely careful when dealing with registers.
+
+We also want to shrink the memory when appropriate.
+The rule used here is once the size of the stack is less than $1/4$ of its
+capacity, the stack is shrinked to half of its capacity
+(and will become half-full).
+However, to avoid frequent reallocations, we only shrink if the capacity
+is greater than a threshold.
+
+@c
+struct val *stk_pop(struct stk *s)
+{
+	assert (s->size > 0);
+	--s->size;
+	if (s->v[s->size] != NULL)
+		val_deref(s->v[s->size]);
+	bst_clr(s->a[s->size]);
+	if (s->cap > 64 && s->size < s->cap / 4)
+		stk_res(s, s->cap / 2);
+	return s->v[s->size];
+}
+
+
+@* Token scanner.  The input is scanned into tokens for further processing.
+There are two kinds of tokens:
+\item{$\bullet$} A {\it character token\/} is a literal character in the input.
+\item{$\bullet$} A {\it value token\/} is a sequence of characters that
+represent a (numeric or string) value.
+
+The input comes from two sources:
+\item{$\bullet$} A file (possibly the standard input), for which I should use
+functions from \.{<stdio.h>} for reading.
+\item{$\bullet$} A string (defined macros), for which I should use pointers
+for reading.
+
+A token scanner is represented by the |lex| structure.
+If the input source is a string, then the |s|~field is non-NULL,
+and the |v|~field in the union references the value object.
+
+(Note: \POSIX/ offers |fmemopen| for creating a |FILE*| given a string;
+it's not used in this program.)
+
+Lastly, the token scanner is actually stacked.  Initially, the program
+is reading from a file. When it starts to execute a macro, a new token
+scanner is pushed onto the stack, and is popped when the macro finishes.
+The |link| field indicates the previous token scanner in the stack.
+
+@d LEX_ISFILE(l) ((l)->s == NULL)
+@s lex int
+@c
+struct lex {
+	union {
+		FILE *f;
+		struct val *v;
+	} u;
+	const char *s;
+	struct lex *link; /* to form a stack */
+};
+
+@ Function |lex_push_file| pushes a token scanner that reads from a file.
+@c
+struct lex *lex_push_file(struct lex *top, FILE *f)
+{
+	struct lex *l;
+
+	l = malloc(sizeof *l);
+	checkptr(l);
+	l->u.f = f;
+	l->s = NULL;
+	l->link = top;
+	return l;
+}
+
+@ Function |lex_push_str| pushes a token scanner that reads from a string.
+
+If the token scanner has reached the end, we can discard the top before
+pushing the new token scanner.  This enables efficient tail recursion.
+
+@c
+struct lex *lex_push_str(struct lex *top, struct val *v)
+{
+	struct lex *l;
+
+	assert(v->type == V_STR);
+	if (top && !LEX_ISFILE(top) && !*top->s) {
+		l = top;
+		val_unref(top->u.v);
+	} else {
+		l = malloc(sizeof *l);
+		checkptr(l);
+		l->link = top;
+	}
+	l->u.v = val_ref(v);
+	l->s = v->u.s.ptr;
+	return l;
+}
+
+@ Function |lex_pop| drops the last token scanner in the stack
+and releases its memory.
+@c
+struct lex *lex_pop(struct lex *top)
+{
+	struct lex *link;
+
+	assert(top != NULL);
+	link = top->link;
+	if (!LEX_ISFILE(top))
+		val_unref(top->u.v);
+	free(top);
+	return link;
+}
+
+@ Function |lex_getc| a character from the input.
+A null character is invalid, and if read from a file,
+it will be interpreted as end of input.
+
+@c
+static int lex_getc(struct lex *l)
+{
+	int ch;
+
+	if (LEX_ISFILE(l))
+		ch = getc(l->u.f);
+	else if ((ch = *l->s & UCHAR_MAX) != '\0')
+		++l->s; /* don't read pass |'\0'| */
+	return ch ? ch : EOF;
+}
+
+@ Function |lex_ungetc| pushes back a character to the input.
+This is necessary because the token scanner sometimes reads ahead.
+Basically, one should only ``unget'' a single character that has just
+been read.
+
+@c
+static int lex_ungetc(int ch, struct lex *l)
+{
+	if (ch == EOF)
+		return ch;
+	if (LEX_ISFILE(l))
+		return ungetc(ch, l->u.f);
+	return *--l->s;
+}
+
+@ Function |lex_gettok| reads a token from the input.
+\item{$\bullet$} For a character token, the return value is its character code.
+\item{$\bullet$} For a value token, it returns zero, and the value is pushed
+onto the main stack.
+\item{$\bullet$} In case of end-of-file or end-of-string, it returns |EOF|.
+
+The rules for a value token loosely follows the \.{dc} convention:
+the characters that start a value token are \.{[0-9A-F\_.[]}.
+
+@c
+struct val *read_str(struct lex *);
+struct val *read_num(struct lex *);
+int lex_gettok(struct lex *l, struct val **v)
+{
+	int ch;
+
+	switch (ch = lex_getc(l)) {
+	case '0': case '1': case '2': case '3': case '4': @|
+	case '5': case '6': case '7': case '8': case '9': @|
+	case 'A': case 'B': case 'C': case 'D': case 'E': case 'F': @|
+	case '_': case '.':
+		lex_ungetc(ch, l);
+		*v = read_num(l);
+		return 0;
+	case '[':
+		*v = read_str(l);
+		return 0;
+	}
+	return ch;
+}
+
+@* Reading values from input.
+Other than reading single-character tokens, this section deals with
+reading a numeric or string value from the input.
+
+One of the difficulties is that the input size is unbounded.
+The solution is to use a dynamic buffer that grows if the input exceeds
+its capacity.
+
+To make the common case fast, we start with a pre-allocated short buffer.
+For short input, we can save time from heap allocations.
+
+@d SHORTBUF_SIZE 256
+@c
+struct buf {
+	char *ptr;
+	size_t len, cap;
+	char shortbuf[SHORTBUF_SIZE];
+};
+
+void buf_ini(struct buf *b)
+{
+	b->ptr = b->shortbuf;
+	b->len = 0;
+	b->cap = SHORTBUF_SIZE;
+}
+
+void buf_free(struct buf *b)
+{
+	if (b->ptr != b->shortbuf)
+		free(b->ptr);
+}
+
+@ Function |buf_res| resizes the buffer.
+It is similar to |stk_res| but also handle the additional complexity
+associated to the short buffer.
+
+@c
+void buf_res(struct buf *b, size_t cap)
+{
+	if (b->ptr == b->shortbuf) {
+		b->ptr = malloc(cap);
+		checkptr(b->ptr);
+		memcpy(b->ptr, b->shortbuf, b->len);
+	} else {
+		b->ptr = realloc(b->ptr, cap);
+		checkptr(b->ptr);
+	}
+	b->cap = cap;
+}
+
+@ Function |buf_add| adds a character to the buffer.
+@c
+void buf_add(struct buf *b, int ch)
+{
+	if (b->len == b->cap)
+		buf_res(b, b->cap * 2);
+	b->ptr[b->len++] = ch;
+}
+
+@ Function |buf_fin| terminates the buffer by appending
+a |'\0'| character to its end.
+
+If using heap memory, shrink it so that no extra memory is allocated.
+
+@c
+void buf_fin(struct buf *b)
+{
+	if (b->ptr != b->shortbuf || b->len == b->cap)
+		buf_res(b, b->len + 1);
+	b->ptr[b->len] = '\0';
+}
+
+@ A string token is a character sequenced enclosed by a balanced pair of
+brackets.  It's unfortunate that there is no escaping so one cannot have
+a string containing unbalanced brackets. (Bad for the user, good for the
+implementer, though.)
+
+@c
+struct val *read_str(struct lex *l)
+{
+	struct buf B;
+	int balance = 1;
+	int ch;
+
+	buf_ini(&B);
+
+	for (;;) {
+		switch (ch = lex_getc(l)) {
+		case '[': ++balance; break;
+		case ']': --balance; break;
+		case EOF: balance = 0;
+			complain("unbalanced []\n");
+			break;
+		}
+		if (balance == 0)
+			break;
+		buf_add(&B, ch);
+	}
+	buf_fin(&B);
+	if (B.ptr == B.shortbuf)
+		B.ptr = memdup(B.ptr, B.len+1);
+	return new_str(B.ptr, B.len);
+}
+
+@ A numeric token contains an optional \.{\_} (negative sign),
+followed by a sequence of hexadecimal digits with an optional decimal point.
+This is the \.{dc} convention.  The extension here is to allow an optional
+expoent in the end, indicated by character \.{e} or \.{@@}.
+
+Note: \.{dc} allowed all of \.{[0-9A-F]} to be valid digits in any base.
+GMP and MPFR do not allow this, so here is the compromise:
+\item{$\bullet$} Any one-digit number is a hexadecimal integer, no matter
+what the current input base is.
+\item{$\bullet$} In any other case, the input digits must contains digits
+that are meaningful in the input base; otherwise the program will complain.
+
+@c
+struct val *read_num(struct lex *l)
+{
+	struct buf B;
+	int isint = 1;
+	int ch;
+
+	buf_ini(&B);
+	ch = lex_getc(l);
+	@<Read an optional negative sign@>;
+	@<Scan hexdigit sequence@>;
+	@<Read an optional fractional part@>;
+	@<Read an optional exponent@>;
+	lex_ungetc(ch, l); /* push back the read-ahead */
+	@<Return a numeric value@>;
+}
+
+@ We use \.{\_} for negative sign, but GMP and MPFR use \.{-}.
+@<Read an optional negative sign@>=
+if (ch == '_') {
+	ch = '-';
+	buf_add(&B, ch);
+	ch = lex_getc(l);
+}
+
+@ If we see a decimal point, a fractional part follows.
+@<Read an optional fractional part@>=
+if (ch == '.') {
+	isint = 0;
+	buf_add(&B, ch);
+	ch = lex_getc(l);
+	@<Scan hexdigit sequence@>;
+}
+
+@ If we see an \.{e}, an exponent follows.
+@<Read an optional exponent@>=
+if (ch == 'e') {
+	isint = 0;
+	ch = '@@'; /* don't confuse MPFR when |_ibase>10| */
+	buf_add(&B, ch);
+	ch = lex_getc(l);
+	if (ch == '+' || ch == '-') {
+		buf_add(&B, ch);
+		ch = lex_getc(l);
+	}
+	@<Scan hexdigit sequence@>;
+}
+
+@ @<Scan hexdigit sequence@>=
+while (isdigit(ch) || (isxdigit(ch) && isupper(ch))) {
+	buf_add(&B, ch);
+	ch = lex_getc(l);
+}
+
+@ @<Return a numeric value@>=
+{
+	struct val *v;
+	int rc;
+
+	buf_fin(&B);
+	if (isint) {
+		v = new_int();
+		rc = mpz_set_str(v->u.z, B.ptr, (B.len == 1) ? 16 : _ibase);
+	} else {
+		v = new_fp(_precision);
+		rc = mpfr_set_str(v->u.f, B.ptr, _ibase, _rnd_mode);
+	}
+	if (rc == -1)
+		complain("malformed number %s in base %d\n", B.ptr, _ibase);
+	buf_free(&B);
+	return v;
+}
+
+@* Writing values to output.
+Function |val_put| writes the value to a file.
+It comes with two formats: the normal format and the special format,
+determined by the |special| argument.
+
+@c
+void val_put(struct val *v, FILE *f, int special)
+{
+	switch (v->type) {
+	case V_INT:
+		@<Write an integer value@>;
+		break;
+	case V_FP:
+		@<Write a floating point value@>;
+		break;
+	case V_STR:
+		fputs(v->u.s.ptr, f);
+		break;
+	}
+}
+
+@ Writing an integer is easy: |mpz_out_str| does the job.
+Function |mpz_out_str| will use uppercase letters if base is negative.
+
+@<Write an integer value@>=
+if (!special)
+	mpz_out_str(f, -_obase, v->u.z);
+else
+	@<Write an integer in special format@>;
+
+@ When writing an integer in the special format,
+Intepret the number as a byte stream, e.g.,
+for the number 15711167 (or |0xefbbbf|), we will write three bytes:
+|0xef|, |0xbb| and |0xbf|.
+
+@<Write an integer in special format@>=
+{
+	size_t n, i;
+	const mp_limb_t *limbs;
+
+	if ((n = mpz_size(v->u.z)) == 0)
+		putchar('\0');
+	else {
+		limbs = mpz_limbs_read(v->u.z);
+
+#define BYTE (limbs[n-1] >> ((i-1)*CHAR_BIT))
+		for (i = sizeof (mp_limb_t); i && BYTE == 0; i--)
+			;
+		for (; i; i--)
+			putc(BYTE & UCHAR_MAX, f);
+		while (--n)
+			for (i = sizeof (mp_limb_t); i; i--)
+				putc(BYTE & UCHAR_MAX, f);
+#undef BYTE
+	}
+}
+
+@ Writing a floating point number is tricky.
+
+First, there are special values (0, $\pm\infty$ or NaN).
+For these values, we call |mpfr_out_str| directly for special values.
+They will show up as \.{@@Inf@@}, \.{-@@Inf@@} or \.{@@NaN@@}.
+
+@<Write a floating point...@>=
+if (!mpfr_number_p(v->u.f))
+	mpfr_out_str(f, _obase, 0, v->u.f, _rnd_mode);
+else
+	@<Write a normal floating point value@>;
+
+@ When writing a normal number, we call |mpfr_get_str| as it gives more
+flexibility: we can truncate trailing zeros and/or
+omit the exponent if we desire.
+
+However, MPFR does not support a negative base and uses lowercase letters
+by default, so we need to convert them to uppercase manually by calling
+|toupper|.
+
+@<Write a normal...@>=
+{
+	size_t n, len, i = 0;
+	char *s;
+	mpfr_exp_t e;
+
+	@<Determine output digits |n|@>;
+	s = mpfr_get_str(NULL, &e, _obase, n, v->u.f, _rnd_mode);
+	len = strlen(s);
+	@<If negative, output and skip the minus sign@>;
+	@<Write digits before decimal point@>;
+	putc('.', f); /* writes the decimal point */
+	@<Write digits after decimal point@>;
+	@<Write the exponent if necessary@>;
+	mpfr_free_str(s);
+}
+
+@ The second difficulty is to determine how many digits to output.
+For a $k$-bit floating point, we output no more than
+$\lfloor k \log_b 2 \rfloor$ digits in base~$b$.
+The printed result is accurate if $k=2$.
+
+If writing in the special format, we will set $n=0$ and let MPFR determine
+how many digits to write.
+The printed result is always accurate (for the purpose of reading back).
+
+@<Determine output digits |n|@>=
+{
+	static const double M[] = {
+		.63092975357145743710,
+		.50000000000000000000,
+		.43067655807339305067,
+		.38685280723454158687,
+		.35620718710802217651,
+		.33333333333333333333,
+		.31546487678572871855,
+		.30102999566398119521,
+		.28906482631788785927,
+		.27894294565112984319,
+		.27023815442731974129,
+		.26264953503719354798,
+		.25595802480981548939,
+		.25000000000000000000
+	}; /* |M[i]|${}=1/\log_2(i+3)$ */
+
+	if (special)
+		n = 0; /* let MPFR decide */
+	else {
+		n = mpfr_get_prec(v->u.f);
+		if (_obase > 2)
+			n *= M[_obase - 3];
+		if (n == 0)
+			n = 1; /* must output at least one digit! */
+	}
+}
+
+@ @<If negative...@>=
+if (s[0] == '-') {
+	putc('-', f);
+	++i;
+	--len;
+}
+
+@
+Finally, we need to write the decimal point and the exponent properlly.
+We will omit the exponent if |e| is between 0 and |len|.
+In this case, we need to place the decimal point at a proper place,
+i.e., after the |e|-th digit.
+
+Note: zero is really a special case because |e==0| for a zero value,
+but we do want one digit before the decimal point.
+
+@<Write digits before...@>=
+if (!special && !mpfr_zero_p(v->u.f) && 0 <= e && (size_t) e <= len)
+	for (; e; e--)
+		putc(toupper(s[i++]), f);
+else
+	putc(s[i++], f); /* only 1 digit before the decimal point */
+
+@ @<Write digits after...@>=
+if (!special)
+	while (s[len-1] == '0')
+		--len; /* remove trailing zeros */
+while (i < len)
+	putc(toupper(s[i++]), f);
+
+@ We use \.{e} to indicate an exponent.
+The exponent is always written in decimal.
+
+Note: If we don't need an exponent, |e| was set to zero in
+|@<Write digits before...@>|.
+
+@<Write the exponent...@>=
+	if (special || e)
+		fprintf(f, "e%ld", (long) (e-1));
+
 
 @* Interpreter.  The input is interpreted as tokens are read.
 The interpreter can manipulate the stack, the registers, and the token scanner.
 
-Function |interpret| reads tokens from the token scanner, executes them
+Function |interpret| reads tokens from the token scanner~|l|, executes them
 until no more tokens are available.
+
+The argument~|r| is an array of registers.  There are |UCHAR_MAX| of them,
+numbered from 1 to |UCHAR_MAX|.  |r[0]| is the main stack and cannot be
+used as a normal register.
 
 @c
 @<Auxiliary functions for the interpreter@>@;
-void interpret(struct lex *l, struct reg *r[], struct arr *a[])
+void interpret(struct lex *l, struct stk r[])
 {
+	struct val *x, *y, *z, *v = NULL;
+	struct stk *rr;
 	int tok;
-	int i;
 
 	while (l != NULL) {
-		switch (tok = lex_gettok(l, &r[0])) {
+		tok = lex_gettok(l, &v);
+		switch (tok) {
 		@<Actions for input token@>;
 		@<Interpreter error conditions@>;
 		}
 	}
 }
 
-@ When the input token is a space character or |'\0'|
-(a value token has been read), no action is required.
+@ When the input token is a space character, no action is required.
 @<Actions...@>+=
 case ' ': case '\t': case '\v': case '\f':
-case '\r': case '\0':
+case '\r':
 	break; /* no action */
+
+@ When a valid is read (|tok == '\0'|), push it onto the stack.
+@<Actions...@>+=
+case '\0':
+	stk_push(r, v);
+	break;
 
 @ @<Interpreter error conditions@>=
 default:
@@ -1207,26 +1328,26 @@ a character in the input.  (Note: this is different from \.{dc}).
 @ The \.{c} command clears the stack.
 @<Actions...@>+=
 case 'c':
-	while (r[0])
-		r[0] = reg_pop(r[0]);
+	while (r->size)
+		val_ckref(stk_pop(r));
 	break;
 
 @ The \.{d} command duplicates the stack top.
+@d CHK(n) if (r->size < n) goto stack_empty
 @<Actions...@>+=
 case 'd':
-	if (r[0] == NULL)
-		goto stack_empty;
-	r[0] = reg_dup(r[0], r[0]);
+	CHK(1);
+	stk_push(r, stk_top(r, 1));
 	break;
 
 @ The \.{f} command dumps the entire stack (from top to bottom).
 @<Actions...@>+=
 case 'f':
 {
-	struct reg *p;
+	size_t i;
 
-	for (p = r[0]; p != NULL; p = p->link) {
-		reg_put(p, stdout, 0);
+	for (i = r->size; i > 0; ) {
+		val_put(r->v[--i], stdout, 0);
 		fputc('\n', stdout);
 	}
 	break;
@@ -1242,37 +1363,32 @@ The differences are:
 case 'n':
 case 'p':
 case 'P':
-	if (r[0] == NULL)
-		goto stack_empty;
-	reg_put(r[0], stdout, tok == 'P');
+	CHK(1);
+	val_put(stk_top(r, 1), stdout, tok == 'P');
 	if (tok == 'p')
 		fputc('\n', stdout);
 	else
-		r[0] = reg_pop(r[0]);
+		val_ckref(stk_pop(r));
 	break;
 
 @ The \.{r} command swaps the top of the stack and the second of the
 stack.
 @<Actions...@>+=
 case 'r':
-	if (r[0] == NULL || r[0]->link == NULL)
-		goto stack_empty;
-	r[0] = reg_rot(r[0]);
+	CHK(2);
+	x = stk_top(r, 1);
+	y = stk_top(r, 2);
+	stk_top(r, 1) = y;
+	stk_top(r, 2) = x;
 	break;
 
 @ The \.{z} command pushes the depth of the stack onto the stack.
 @<Actions...@>+=
 case 'z':
-{
-	unsigned long depth = 0;
-	struct reg *p;
-
-	for (p = r[0]; p; p = p->link)
-		++depth;
-	r[0] = reg_push(r[0], REG_Z);
-	mpz_set_ui(r[0]->u.z, depth);
+	v = new_int();
+	mpz_set_ui(v->u.z, r->size);
+	stk_push(r, v);
 	break;
-}
 
 @*1 Control flow.  The commands in this section make changes to the token
 scanner, so we do not always execute the input linearly.
@@ -1295,12 +1411,12 @@ and pops $n$ token scanners.  It never pops the last one, though.
 @<Actions...@>+=
 case 'Q':
 {
-	size_t n;
+	unsigned long n;
 
-	if (r[0] == NULL)
-		goto stack_empty;
-	n = reg_get_ui(r[0]);
-	r[0] = reg_pop(r[0]);
+	CHK(1);
+	x = stk_pop(r);
+	val_to_ui(x, &n);
+	val_ckref(x);
 	while (n-- && l->link)
 		l = lex_pop(l);
 	break;
@@ -1323,14 +1439,12 @@ case '\n':
 @ The \.{x} command takes the top of the stack and executes it.
 @<Actions...@>+=
 case 'x':
-	if (r[0] == NULL)
-		goto stack_empty;
-	if (r[0]->type == REG_S) {
-		l = lex_push_str(l, r[0]->u.s.ptr, r[0]->u.s.len);
-		r[0]->u.s.ptr = NULL; /* steal the string */
-		r[0] = reg_pop(r[0]);
-	}
-	/* otherwise the value is pushed back */
+	CHK(1);
+	x = stk_pop(r);
+	if (x->type == V_STR)
+		l = lex_push_str(l, x);
+	else
+		stk_push(r, x);
 	break;
 
 @ The \.{!} command reads a line and invokes an external command
@@ -1339,18 +1453,16 @@ as indicated by the line.
 @<Actions...@>+=
 case '!':
 {
-	char *buf;
-	size_t len = 0, cap = 64;
+	struct buf B;
 	int ch;
 
-	buf = malloc(cap);
-	checkptr(buf);
+	buf_ini(&B);
 	while ((ch = lex_getc(l)) != EOF && ch != '\n')
-		buf = buf_add(buf, &len, &cap, ch);
-	buf = buf_add(buf, &len, &cap, '\0');
-	if (system(buf) == -1)
+		buf_add(&B, ch);
+	buf_fin(&B);
+	if (system(B.ptr) == -1)
 		perror(progname);
-	free(buf);
+	buf_free(&B);
 	break;
 }
 
@@ -1376,57 +1488,56 @@ case '<':
 case '>':
 case '=':
 {
-	struct reg *lhs, *rhs;
 	int rc;
 
 	mpfr_clear_erangeflag();
-	if ((lhs = r[0]) == NULL || (rhs = lhs->link) == NULL) {
+	if (r->size < 2) {
 		complain("stack empty\n");
 		rc = 0;
 	} else {
-		rc = reg_cmp(lhs, rhs);
-		r[0] = reg_pop(reg_pop(r[0]));
+		x = stk_pop(r);
+		y = stk_pop(r);
+		rc = val_cmp(x, y);
+		val_ckref(x);
+		val_ckref(y);
 	}
-	if ((i = get_reg(l, r, 0)) == -1)
+	if ((rr = get_reg(l, r, 1)) == NULL)
 		break;
+
 	if (!mpfr_erangeflag_p() &&
 			((tok == '<' && rc < 0) ||
 			(tok == '=' && rc == 0) ||
 			(tok == '>' && rc > 0))) {
-		if (r[i] == NULL)
-			complain("register %s is empty\n", tok2str(i));
-		else if (r[i]->type == REG_S)
-			l = lex_push_str(l,
-				memdup(r[i]->u.s.ptr, r[i]->u.s.len + 1),
-				r[i]->u.s.len);
+		z = stk_top(rr, 1);
+		assert(rr->size > 0 && z != NULL);
+		if (z->type == V_STR)
+			l = lex_push_str(l, z);
 		else
-			r[0] = reg_dup(r[0], r[i]);
+			stk_push(r, z);
 	}
 	break;
 }
 
 @ Function |get_reg| reads a character from the input and use its
-character code (ranging from 0 to |UCHAR_MAX+1|) to determine the
-register.  On most common machines, there are 256 registers.
-
-It returns the index to the register, or $-1$ if something goes wrong.
+character code to determine the register.
 
 @<Auxiliary functions for the interpreter@>+=
-int get_reg(struct lex *l, struct reg *r[], int non_empty)
+struct stk *get_reg(struct lex *l, struct stk r[], int non_empty)
 {
+	struct stk *rr;
 	int i;
 
-	i = lex_getc(l);
-	if (i == EOF) {
+	if ((i = lex_getc(l)) == EOF) {
 		complain("unexpected EO%c\n", LEX_ISFILE(l) ? 'F' : 'S');
-		return -1;
+		return NULL;
 	}
-	i &= UCHAR_MAX;
-	if (non_empty && r[i] == NULL) {
+	assert(i != 0);
+	rr = &r[i];
+	if (non_empty && (rr->size == 0 || stk_top(rr, 1) == NULL)) {
 		complain("register %s is empty\n", tok2str(i));
-		return -1;
+		return NULL;
 	}
-	return i;
+	return rr;
 }
 
 @*1 Register operations.  The commands in this section operates on
@@ -1441,51 +1552,31 @@ register's previous value can be restored by the \.{L}~command.
 @<Actions...@>+=
 case 's':
 case 'S':
-{
-	struct reg *top;
-
-	if ((i = get_reg(l, r, 0)) != -1) {
-		if ((top = r[0]) == NULL)
-			goto stack_empty;
-		r[0] = top->link;
-		if (tok == 'S') {
-			top->link = r[i];
-			a[i] = arr_push(a[i]);
-		} else {
-			top->link = (r[i]) ? reg_pop(r[i]) : NULL;
+	if ((rr = get_reg(l, r, 0)) != NULL) {
+		CHK(1);
+		x = stk_pop(r);
+		if (tok == 'S' || rr->size == 0)
+			stk_push(rr, x);
+		else {
+			if (stk_top(rr, 1) != NULL)
+				val_unref(stk_top(rr, 1));
+			stk_top(rr, 1) = val_ref(x);
 		}
-		r[i] = top;
 	}
 	break;
-}
 
 @ The \.{l}~command loads the value in a register and pushes it onto
 the stack.  The value of the register keeps unchanged.
 
-@<Actions...@>+=
-case 'l':
-	if ((i = get_reg(l, r, 1)) != -1)
-		r[0] = reg_dup(r[0], r[i]);
-	break;
-
-@ The \.{L}~command loads the value in a register and pushes it onto
+The \.{L}~command loads the value in a register and pushes it onto
 the stack.  The register is restored to its previous value.
 
 @<Actions...@>+=
+case 'l':
 case 'L':
-{
-	struct reg *link;
-
-	if ((i = get_reg(l, r, 1)) != -1) {
-		link = r[i]->link;
-		r[i]->link = r[0];
-		r[0] = r[i];
-		r[i] = link;
-		if (a[i])
-			a[i] = arr_pop(a[i]);
-	}
+	if ((rr = get_reg(l, r, 1)) != NULL)
+		stk_push(r, (tok == 'l') ? stk_top(rr, 1) : stk_pop(rr));
 	break;
-}
 
 @*1 Binary operators.
 The commands in this section performs binary operations.
@@ -1507,18 +1598,37 @@ $$\tabskip=1em\vbox{\halign{
 }}$$
 
 @<Actions...@>+=
-case '+':
-	r[0] = reg_bin(r[0], mpz_add, mpfr_add_z, mpfr_add_z, mpfr_add);
+case '+': case '-': case '*': case '/': case '%': case '^':
+	CHK(2);
+	y = stk_pop(r);
+	x = stk_pop(r);
+	z = NULL;
+	switch (tok) {
+	case '+':
+		z = val_bin(x, y, mpz_add, mpfr_add_z, mpfr_add_z, mpfr_add);
+		break;
+	case '-':
+		z = val_bin(x, y, mpz_sub, my_mpfr_z_sub, mpfr_sub_z, mpfr_sub);
+		break;
+	case '*':
+		z = val_bin(x, y, mpz_mul, mpfr_mul_z, mpfr_mul_z, mpfr_mul);
+		break;
+	case '^':
+		z = val_bin(x, y, my_mpz_pow, NULL, mpfr_pow_z, mpfr_pow);
+		break;
+	case '/':
+		z = val_bin(x, y, my_mpz_tdiv_q, NULL, mpfr_div_z, mpfr_div);
+		break;
+	case '%':
+		z = val_bin(x, y, my_mpz_tdiv_r, NULL, NULL, mpfr_fmod);
+		break;
+	}
+	assert(z != NULL);
+	stk_push(r, z);
+	val_ckref(x);
+	val_ckref(y);
 	break;
-case '-':
-	r[0] = reg_bin(r[0], mpz_sub, my_mpfr_z_sub, mpfr_sub_z, mpfr_sub);
-	break;
-case '*':
-	r[0] = reg_bin(r[0], mpz_mul, mpfr_mul_z, mpfr_mul_z, mpfr_mul);
-	break;
-case '^':
-	r[0] = reg_bin(r[0], my_mpz_pow, NULL, mpfr_pow_z, mpfr_pow);
-	break;
+
 
 @ Function |my_mpz_pow| takes two |mpz_t|s but actually only works
 if the exponent fits in an |unsigned long|.
@@ -1543,65 +1653,72 @@ int my_mpfr_z_sub(mpfr_t z, const mpfr_t x, const mpz_t y, mpfr_rnd_t r)
 	return mpfr_z_sub(z, y, x, r);
 }
 
-@ Division requires some caution to avoid division by zero.
-Only integer division is dangerous; floating point division-by-zero
-results in NaN.
-
-@d REG_IS_Z(r) ((r)&&(r)->type == REG_Z)
-@<Actions...@>+=
-case '/':
-case '%':
-	if (REG_IS_Z(r[0]) && REG_IS_Z(r[0]->link) &&
-			mpz_cmp_ui(r[0]->u.z, 0) == 0) {
+@ Function |my_mpz_tdiv_q| and |my_mpz_tdiv_r| complains in case of division
+by zero, instead of signaling floating point exception.
+@<Auxiliary functions for the interpreter@>+=
+void my_mpz_tdiv_q(mpz_t z, const mpz_t x, const mpz_t y)
+{
+	if (mpz_cmp_ui(y, 0) == 0)
 		complain("division by zero\n");
-		break;
-	}
-	if (tok == '/')
-		r[0] = reg_bin(r[0], mpz_tdiv_q, NULL, mpfr_div_z, mpfr_div);
 	else
-		r[0] = reg_bin(r[0], mpz_tdiv_r, NULL, NULL, mpfr_fmod);
-	break;
+		mpz_tdiv_q(z, x, y);
+}
+
+void my_mpz_tdiv_r(mpz_t z, const mpz_t x, const mpz_t y)
+{
+	if (mpz_cmp_ui(y, 0) == 0)
+		complain("division by zero\n");
+	else
+		mpz_tdiv_r(z, x, y);
+}
 
 @ Command \.{\~} takes two integers from the stack and pushes
 the quotient and remainder back.  It works only for integers.
 
 @<Actions...@>+=
 case '~':
-{
-	struct reg *lhs, *rhs;
+	CHK(2);
 
-	if ((rhs = r[0]) == NULL || (lhs = rhs->link) == NULL)
-		goto stack_empty;
-	if (lhs->type != REG_Z && rhs->type != REG_Z)
+	y = stk_pop(r);
+	x = stk_pop(r);
+	z = (x->refcnt == 0) ? x : new_int();
+	v = (y->refcnt == 0) ? y : new_int();
+	if (x->type != V_INT && y->type != V_INT)
 		complain("non-integer value\n");
-	else
-		mpz_tdiv_qr(lhs->u.z, rhs->u.z, lhs->u.z, rhs->u.z);
+	else {
+		mpz_tdiv_qr(z->u.z, v->u.z, x->u.z, y->u.z);
+		stk_push(r, z);
+		stk_push(r, v);
+	}
+	val_ckref(x);
+	val_ckref(y);
 	break;
-}
 
 @ Command \.{\char"7C} is actually a ternary operator.
 It takes three integers $x$, $y$, $m$ and returns $x^y \bmod m$
 (borrowed from GNU \.{dc}).
-It can be useful if $y$ is very large.
+It can be useful if $x^y$ is very large.
 
 @<Actions...@>+=
 case '|':
-{
-	struct reg *x, *y, *m;
+	CHK(3);
 
-	if ((m = r[0]) == NULL || (y = m->link) == NULL ||
-			(x = y->link) == NULL)
-		goto stack_empty;
-	if (x->type != REG_Z || y->type != REG_Z || m->type != REG_Z)
+	z = stk_pop(r);
+	y = stk_pop(r);
+	x = stk_pop(r);
+	v = (x->refcnt == 0) ? x : new_int();
+	if (x->type != V_INT || y->type != V_INT || z->type != V_INT)
 		complain("non-integer value\n");
-	else if (mpz_cmp_ui(y->u.z, 0) == 0 || mpz_cmp_ui(m->u.z, 0) == 0)
+	else if (mpz_cmp_ui(y->u.z, 0) == 0 || mpz_cmp_ui(z->u.z, 0) == 0)
 		complain("division by zero\n");
 	else {
-		mpz_powm(x->u.z, x->u.z, y->u.z, m->u.z);
-		r[0] = reg_pop(reg_pop(r[0]));
+		mpz_powm(v->u.z, x->u.z, y->u.z, z->u.z);
+		stk_push(r, v);
 	}
+	val_ckref(x);
+	val_ckref(y);
+	val_ckref(z);
 	break;
-}
 
 @*1 Unary operators.
 Unary operations are mostly mathematical functions.
@@ -1629,32 +1746,50 @@ by \.{m}.
 
 @<Actions...@>+=
 case 'v':
-	if (REG_IS_Z(r[0]) && mpz_cmp_ui(r[0]->u.z, 0) < 0)
-		complain("square root of negative number\n");
-	else
-		r[0] = reg_un(r[0], mpz_sqrt, mpfr_sqrt);
+	CHK(1);
+	x = stk_pop(r);
+	y = val_un(x, my_mpz_sqrt, mpfr_sqrt);
+	if (y)
+		stk_push(r, y);
+	val_ckref(x);
 	break;
 case 'm':
-	switch (tok = get_reg(l, r, 0)) {
-	case -1: break; /* invalid */
+	tok = lex_getc(l);
+	CHK(1);
+	x = stk_pop(r);
+	y = NULL;
+	switch (tok) {
+	case EOF: break; /* invalid */
 	@<Math library functions@>;
 	default:
 		complain("math function %s not implmented\n", tok2str(tok));
 		break;
 	}
+	if (y)
+		stk_push(r, y);
+	val_ckref(x);
 	break;
+
+@ @<Auxiliary functions for the interpreter@>+=
+void my_mpz_sqrt(mpz_t z, const mpz_t x)
+{
+	if (mpz_cmp_ui(x, 0) < 0)
+		complain("square root of negative number\n");
+	else
+		mpz_sqrt(z, x);
+}
 
 @ For unary math functions, call |reg_un|.
 @<Math library functions@>=
-case 's': r[0] = reg_un(r[0], NULL, mpfr_sin); break;
-case 'c': r[0] = reg_un(r[0], NULL, mpfr_cos); break;
-case 'a': r[0] = reg_un(r[0], NULL, mpfr_atan); break;
-case 'l': r[0] = reg_un(r[0], NULL, mpfr_log); break;
-case 'e': r[0] = reg_un(r[0], NULL, mpfr_exp); break;
-case 'z': r[0] = reg_un(r[0], NULL, mpfr_zeta); break;
-case 'g': r[0] = reg_un(r[0], NULL, mpfr_gamma); break;
-case 'G': r[0] = reg_un(r[0], NULL, mpfr_lngamma); break;
-case 'r': r[0] = reg_un(r[0], NULL, mpfr_rint); break;
+case 's': y = val_un(x, NULL, mpfr_sin); break;
+case 'c': y = val_un(x, NULL, mpfr_cos); break;
+case 'a': y = val_un(x, NULL, mpfr_atan); break;
+case 'l': y = val_un(x, NULL, mpfr_log); break;
+case 'e': y = val_un(x, NULL, mpfr_exp); break;
+case 'z': y = val_un(x, NULL, mpfr_zeta); break;
+case 'g': y = val_un(x, NULL, mpfr_gamma); break;
+case 'G': y = val_un(x, NULL, mpfr_lngamma); break;
+case 'r': y = val_un(x, NULL, mpfr_rint); break;
 
 @*1 Special functions.
 
@@ -1673,18 +1808,21 @@ Note: \.{bc} supports only \.{j} and also only integer orders.
 case 'j':
 case 'y':
 {
-	struct reg *n, *x;
+	long n;
 
-	if ((n = r[0]) == NULL || (x = n->link) == NULL)
-		goto stack_empty;
-	if (n->type == REG_S || x->type == REG_S) {
+	CHK(2);
+	y = stk_pop(r);
+	x = stk_pop(r);
+	if ((z = val_to_fp(x)) && val_to_si(y, &n)) {
+		v = (z->refcnt == 0) ? z : new_fp(_precision);
+		((tok == 'j') ? mpfr_jn : mpfr_yn)
+			(v->u.f, n, x->u.f, _rnd_mode);
+		stk_push(r, v);
+	} else
 		complain("non-numeric value\n");
-		break;
-	}
-	reg_conv(x, REG_F);
-	((tok == 'j') ? mpfr_jn : mpfr_yn)
-		(x->u.f, reg_get_si(n), x->u.f, _rnd_mode);
-	r[0] = reg_pop(r[0]);
+	val_ckref(x);
+	val_ckref(y);
+	val_ckref(z);
 	break;
 }
 
@@ -1700,55 +1838,34 @@ case ':':
 case ';':
 {
 	unsigned long k = 0;
-	int bad_index = 0;
-	struct reg *v;
+	int ok;
+	struct bst **root;
 
-	if ((i = get_reg(l, r, 0)) == -1)
+	if ((rr = get_reg(l, r, 0)) == NULL)
 		break;
 
-	if (r[0] == NULL)
-		goto stack_empty;
-	switch (r[0]->type) {
-	case REG_Z:
-		if (mpz_fits_ulong_p(r[0]->u.z))
-			k = mpz_get_ui(r[0]->u.z);
-		else
-			bad_index = 1;
-		break;
-	case REG_F:
-		if (mpfr_fits_ulong_p(r[0]->u.f, _rnd_mode))
-			k = mpfr_get_ui(r[0]->u.f, _rnd_mode);
-		else
-			bad_index = 1;
-		break;
-	case REG_S:
-		bad_index = 1;
-		break;
-	}
-	if (!bad_index)
-		k = reg_get_ui(r[0]);
-	else
+	CHK(1);
+	y = stk_pop(r);
+	ok = val_to_ui(y, &k);
+	if (!ok)
 		complain("array index must be a non-negative integer\n");
-	r[0] = reg_pop(r[0]);
-	if (a[i] == NULL)
-		a[i] = arr_push(a[i]);
+	val_ckref(y);
+	if (rr->size == 0) {
+		if (rr->cap == 0)
+			stk_res(rr, 1);
+		rr->v[0] = NULL;
+		rr->a[0] = NULL;
+		++rr->size;
+	}
+	root = &rr->a[rr->size-1];
 	if (tok == ':') {
-		if (r[0] == NULL)
-			goto stack_empty;
-		if (!bad_index) {
-			v = r[0];
-			r[0] = r[0]->link;
-			v->link = NULL;
-			arr_set(a[i], k, v);
-		} else {
-			r[0] = reg_pop(r[0]);
-		}
-	} else if (!bad_index) {
-		v = arr_get(a[i], k);
-		if (v)
-			r[0] = reg_dup(r[0], v);
-		else
-			r[0] = reg_push(r[0], REG_Z);
+		CHK(1);
+		x = stk_pop(r);
+		if (ok)
+			*root = bst_set(*root, k, x);
+	} else if (ok) {
+		*root = bst_get(*root, k, &v);
+		stk_push(r, v ? v : new_int());
 	}
 	break;
 }
@@ -1761,22 +1878,21 @@ by the commands in this section.
 case 'i':
 case 'o':
 {
-	unsigned long b;
+	long b;
 
-	if (r[0] == NULL)
-		goto stack_empty;
+	CHK(1);
 
-	b = reg_get_ui(r[0]);
-
+	x = stk_pop(r);
+	val_to_si(x, &b);
+	val_ckref(x);
 	if (b < 2)
-		complain("base too small; set to %d\n", b=2);
+		complain("base too small; set to %ld\n", b=2);
 	else if (b > 16)
-		complain("base too large; set to %d\n", b=16);
+		complain("base too large; set to %ld\n", b=16);
 	if (tok == 'i')
 		_ibase = b;
 	else
 		_obase = b;
-	r[0] = reg_pop(r[0]);
 	break;
 }
 
@@ -1785,8 +1901,9 @@ the stack, respectively.
 @<Actions...@>+=
 case 'I':
 case 'O':
-	r[0] = reg_push(r[0], REG_Z);
-	mpz_set_si(r[0]->u.z, (tok == 'I') ? _ibase : _obase);
+	x = new_int();
+	mpz_set_si(x->u.z, (tok == 'I') ? _ibase : _obase);
+	stk_push(r, x);
 	break;
 
 @ The \.{k} command sets the floating point precision.
@@ -1800,33 +1917,39 @@ case 'k':
 {
 	unsigned long p;
 
-	if (r[0] == NULL)
-		goto stack_empty;
-	p = reg_get_ui(r[0]);
+	CHK(1);
+	x = stk_pop(r);
+	val_to_ui(x, &p);
+	val_ckref(x);
 	if (p < MPFR_PREC_MIN)
-		complain("precision too small; set to %ld\n",
-			(long) (p = MPFR_PREC_MIN));
+		complain("precision too small; set to %lu\n",
+			p = MPFR_PREC_MIN);
 	else if (p > MPFR_PREC_MAX)
-		complain("precision too large; set to %ld\n",
-			(long) (p = MPFR_PREC_MAX));
+		complain("precision too large; set to %lu\n",
+			p = MPFR_PREC_MAX);
 	_precision = p;
-	r[0] = reg_pop(r[0]);
 	break;
 }
 
 @ The \.{K} command pushes the current floating point precision onto the stack.
 @<Actions...@>+=
 case 'K':
-	r[0] = reg_push(r[0], REG_Z);
-	mpz_set_ui(r[0]->u.z, _precision);
+	x = new_int();
+	mpz_set_ui(x->u.z, _precision);
+	stk_push(r, x);
 	break;
 
 @ The \.{u} command sets the floating point rounding mode.
 @<Actions...@>+=
 case 'u':
-	if (r[0] == NULL)
-		goto stack_empty;
-	switch (reg_get_si(r[0])) {
+{
+	long mode;
+
+	CHK(1);
+	x = stk_pop(r);
+	val_to_si(x, &mode);
+	val_ckref(x);
+	switch (mode) {
 	case 0: _rnd_mode = MPFR_RNDN; break;
 	case 1: _rnd_mode = MPFR_RNDZ; break;
 	case 2: _rnd_mode = MPFR_RNDU; break;
@@ -1834,14 +1957,15 @@ case 'u':
 	case 4: _rnd_mode = MPFR_RNDA; break;
 	default: complain("invalid rounding mode\n"); break;
 	}
-	r[0] = reg_pop(r[0]);
 	break;
+}
 
 @ The \.{U} command pushes the current floating point precision onto the stack.
 @<Actions...@>+=
 case 'U':
-	r[0] = reg_push(r[0], REG_Z);
-	mpz_set_ui(r[0]->u.z, _rnd_mode);
+	x = new_int();
+	mpz_set_ui(x->u.z, _rnd_mode);
+	stk_push(r, x);
 	break;
 
 
@@ -1855,20 +1979,18 @@ then the standard input is read.
 @<Auxiliary functions for |main|@>@;
 int main(int argc, char *argv[])
 {
-	static struct reg *r[UCHAR_MAX+1];
-	static struct arr *a[UCHAR_MAX+1];
+	static struct stk r[UCHAR_MAX+1];
 	int rc = 0;
 	int read_stdin = 1;
-	int i;
 
 	@<Process command line arguments@>;
 
 	if (*argv != NULL)
 		do
-			exec_file(fopen(*argv++, "r"), r, a);
+			exec_file(fopen(*argv++, "r"), r);
 		while (*argv != NULL);
 	else if (read_stdin)
-		exec_file(stdin, r, a);
+		exec_file(stdin, r);
 
 	@<Clean up registers and arrays@>;
 	return rc;
@@ -1876,12 +1998,12 @@ int main(int argc, char *argv[])
 
 @ Function |exec_file| executes a file.
 @<Auxiliary functions for |main|@>=
-void exec_file(FILE *f, struct reg *r[], struct arr *a[])
+void exec_file(FILE *f, struct stk r[])
 {
 	if (f == NULL)
 		perror(progname);
 	else {
-		interpret(lex_push_file(NULL, f), r, a);
+		interpret(lex_push_file(NULL, f), r);
 		fclose(f);
 	}
 }
@@ -1905,16 +2027,15 @@ case 'f':
 	size_t len;
 
 	arg = (*argv++) + 2;
-	if (*arg == '\0' && (arg = *argv++) == NULL) {
-		complain("missing argument for %s\n", argv[-1]);
-		return 1;
-	}
-	if (ch == 'e') {
+	if (*arg == '\0' && (arg = *argv++) == NULL)
+		complain("missing argument for %s\n", (--argv)[-1]);
+	else if (ch == 'f')
+		exec_file(fopen(arg, "r"), r);
+	else {
 		read_stdin = 0;
 		len = strlen(arg);
-		interpret(lex_push_str(NULL, memdup(arg, len+1), len), r, a);
-	} else {
-		exec_file(fopen(arg, "r"), r, a);
+		interpret(lex_push_str(NULL,
+			new_str(memdup(arg, len+1), len)), r);
 	}
 	break;
 }
@@ -1933,11 +2054,17 @@ case 'h':
 	return rc;
 
 @ @<Clean up registers...@>=
-for (i = 0; i <= UCHAR_MAX; i++) {
-	while (r[i])
-		r[i] = reg_pop(r[i]);
-	while (a[i])
-		a[i] = arr_pop(a[i]);
+{
+	int i;
+	struct val *v;
+
+	for (i = 0; i <= UCHAR_MAX; i++) {
+		while (r[i].size > 0)
+			if ((v = stk_pop(&r[i])) != NULL)
+				val_ckref(v);
+		free(r[i].v);
+		free(r[i].a);
+	}
 }
 
 @* Index.
