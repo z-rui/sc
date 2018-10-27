@@ -1481,7 +1481,8 @@ case 'L':
 		r[i]->link = r[0];
 		r[0] = r[i];
 		r[i] = link;
-		a[i] = arr_pop(a[i]);
+		if (a[i])
+			a[i] = arr_pop(a[i]);
 	}
 	break;
 }
