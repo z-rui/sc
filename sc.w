@@ -1254,7 +1254,7 @@ if (!special && 0 <= e && (size_t) e <= len)
 	for (; e; e--)
 		putc(toupper(s[i++]), f);
 else
-	putc(s[i++], f); /* only 1 digit before the decimal point */
+	putc(toupper(s[i++]), f); /* only 1 digit before the decimal point */
 
 @ @<Write digits after...@>=
 if (!special)
