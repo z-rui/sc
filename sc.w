@@ -193,9 +193,17 @@ void val_deref(struct val *v)
 one must call |val_ckref| before losing reference to that object
 to avoid resources leak.
 
+We must be careful about aliasing, though.
+If |x| and |y| points to the same floating object, then
+sequentially checking for floating results in undefined behavior.
+
 The convenience macro |val_unref| is provided to perform the checking after
 decrementing the reference count.
+
 @d val_unref(v) (val_deref(v), val_ckref(v))
+@d val_ckref2(x, y) do { val_ckref(x); if (x != y) val_ckref(y); } while (0)
+@d val_ckref3(x, y, z) do { val_ckref2(x, y);
+	if (x != z && y != z) val_ckref(z); } while (0)
 @c
 size_t val_ckref(struct val *v)
 {
@@ -1500,8 +1508,7 @@ case '=':
 		x = stk_pop(r);
 		y = stk_pop(r);
 		rc = val_cmp(x, y);
-		val_ckref(x);
-		val_ckref(y);
+		val_ckref2(x, y);
 	}
 	if ((rr = get_reg(l, r, 1)) == NULL)
 		break;
@@ -1625,10 +1632,9 @@ case '+': case '-': case '*': case '/': case '%': case '^':
 		z = val_bin(x, y, my_mpz_tdiv_r, NULL, NULL, mpfr_fmod);
 		break;
 	}
-	assert(z != NULL);
-	stk_push(r, z);
-	val_ckref(x);
-	val_ckref(y);
+	if (z != NULL)
+		stk_push(r, z);
+	val_ckref2(x, y);
 	break;
 
 
@@ -1684,16 +1690,14 @@ case '~':
 	y = stk_pop(r);
 	x = stk_pop(r);
 	z = (x->refcnt == 0) ? x : new_int();
-	v = (y->refcnt == 0) ? y : new_int();
+	v = (x != y && y->refcnt == 0) ? y : new_int();
 	if (x->type != V_INT && y->type != V_INT)
 		complain("non-integer value\n");
-	else {
+	else
 		mpz_tdiv_qr(z->u.z, v->u.z, x->u.z, y->u.z);
-		stk_push(r, z);
-		stk_push(r, v);
-	}
-	val_ckref(x);
-	val_ckref(y);
+	stk_push(r, z);
+	stk_push(r, v);
+	val_ckref2(x, y);
 	break;
 
 @ Command \.{\char"7C} is actually a ternary operator.
@@ -1713,13 +1717,10 @@ case '|':
 		complain("non-integer value\n");
 	else if (mpz_cmp_ui(y->u.z, 0) == 0 || mpz_cmp_ui(z->u.z, 0) == 0)
 		complain("division by zero\n");
-	else {
+	else
 		mpz_powm(v->u.z, x->u.z, y->u.z, z->u.z);
-		stk_push(r, v);
-	}
-	val_ckref(x);
-	val_ckref(y);
-	val_ckref(z);
+	stk_push(r, v);
+	val_ckref3(x, y, z);
 	break;
 
 @*1 Unary operators.
@@ -1822,9 +1823,7 @@ case 'y':
 		stk_push(r, v);
 	} else
 		complain("non-numeric value\n");
-	val_ckref(x);
-	val_ckref(y);
-	val_ckref(z);
+	val_ckref3(x, y, z);
 	break;
 }
 
