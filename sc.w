@@ -314,7 +314,7 @@ int val_to_si(struct val *v, long *x)
 	}
 }
 
-@ Function |val_to_fp| converts the register to floating point.
+@ Function |val_to_fp| converts the value to floating point.
 It is used when the operands have different types.
 
 @c
@@ -1813,17 +1813,15 @@ case 'y':
 {
 	long n;
 
-	CHK(2);
-	y = stk_pop(r);
+	val_to_si(x, &n);
+	val_ckref(x);
+	CHK(1);
 	x = stk_pop(r);
-	if ((z = val_to_fp(x)) && val_to_si(y, &n)) {
-		v = (z->refcnt == 0) ? z : new_fp(_precision);
+	if ((z = val_to_fp(x)) != NULL) {
+		y = CAN_REUSE_FP(z) ? z : new_fp(_precision);
 		((tok == 'j') ? mpfr_jn : mpfr_yn)
-			(v->u.f, n, x->u.f, _rnd_mode);
-		stk_push(r, v);
-	} else
-		complain("non-numeric value\n");
-	val_ckref3(x, y, z);
+			(y->u.f, n, z->u.f, _rnd_mode);
+	}
 	break;
 }
 
