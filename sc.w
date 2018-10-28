@@ -1680,8 +1680,14 @@ void my_mpz_tdiv_r(mpz_t z, const mpz_t x, const mpz_t y)
 		mpz_tdiv_r(z, x, y);
 }
 
+@*1 Integer-specific operations.
+Some operations are only valid on integer operands:
+\item{$\bullet$} Quotient and remainder;
+\item{$\bullet$} Power modulo;
+\item{$\bullet$} Bitwise operations.
+
 @ Command \.{\~} takes two integers from the stack and pushes
-the quotient and remainder back.  It works only for integers.
+the quotient and remainder back.
 
 @<Actions...@>+=
 case '~':
@@ -1723,6 +1729,143 @@ case '|':
 	val_ckref3(x, y, z);
 	break;
 
+@ Bitwise operators are prefixed by \.{\&} and are summarized below.
+Negative numbers are treated as two's complement with an infinite
+number of leading ones.
+$$\tabskip=1em\vbox{\halign{
+\strut\tt\hfil#\hfil&\hfil$#$\hfil&#\hfil\cr
+\noalign{\hrule\kern1pt}
+\rm Operator&\hbox{Result}&Notes\cr
+\noalign{\hrule\kern1pt}
+\char"26& x\wedge y&Bitwise and\cr
+\char"7C& x\vee y&Bitwise (inclusive) or\cr
+\^{}& x\oplus y&Bitwise exclusive or (XOR)\cr
+\~{}& \lnot x&One's complement\cr
+\#& \hbox{\# of 1's in }x&Population count; $-1$ if $x$ is negative\cr
+<& x\ll y&Left shift; $y$ must be non-negative, same below\cr
+>& x\gg y&Right shift\cr
+s& x\vee (1\ll y)&Set bit\cr
+c& x\wedge \lnot (1\ll y)&Clear bit\cr
+t& x\oplus (1\ll y)&Toggle bit\cr
+T& \cases{1&if $x\wedge (1\ll y)\ne0$\cr\mathstrut0&otherwise}&
+Test bit\cr
+\noalign{\hrule}
+}}$$
+All bitwise operations are extensions.
+
+@<Actions...@>+=
+case '&':
+	switch (tok = lex_getc(l)) {
+	default:
+		complain("bitwise operator %s is not implemented\n",
+			tok2str(tok));
+	case EOF: break;
+	@<Binary bitwise operators@>@;
+	@<Unary bitwise operators@>@;
+	}
+	break;
+
+@ @<Binary bitwise operators@>=
+case '&': case '|': case '^':
+	CHK(2);
+	y = stk_pop(r);
+	x = stk_pop(r);
+	z = NULL;
+	switch (tok) {
+	case '&':
+		z = val_bin(x, y, mpz_and, NULL, NULL, NULL);
+		break;
+	case '|':
+		z = val_bin(x, y, mpz_ior, NULL, NULL, NULL);
+		break;
+	case '^':
+		z = val_bin(x, y, mpz_xor, NULL, NULL, NULL);
+		break;
+	}
+	if (z != NULL)
+		stk_push(r, z);
+	val_ckref2(x, y);
+	break;
+
+@ @<Binary bitwise operators@>=
+case '<': case '>':
+case 's': case 'c': case 't': case 'T':
+{
+	unsigned long n;
+	int ok;
+
+	CHK(2);
+	x = stk_pop(r);
+	ok = val_to_ui(x, &n);
+	val_ckref(x);
+	if (!ok) {
+		complain("infeasible shift amount\n");
+		break;
+	}
+	x = stk_pop(r);
+	if (x->type != V_INT)
+		complain("non-integer value\n");
+	else {
+		y = (x->refcnt == 0) ? x : new_int();
+		switch (tok) {
+		case '<':
+			mpz_mul_2exp(y->u.z, x->u.z, n);
+			break;
+		case '>':
+			mpz_div_2exp(y->u.z, x->u.z, n);
+			break;
+		case 's':
+			if (x != y)
+				mpz_set(y->u.z, x->u.z);
+			mpz_setbit(y->u.z, n);
+			break;
+		case 'c':
+			if (x != y)
+				mpz_set(y->u.z, x->u.z);
+			mpz_clrbit(y->u.z, n);
+			break;
+		case 't':
+			if (x != y)
+				mpz_set(y->u.z, x->u.z);
+			mpz_combit(y->u.z, n);
+			break;
+		case 'T':
+			mpz_set_ui(y->u.z, mpz_tstbit(x->u.z, n));
+			break;
+		}
+		stk_push(r, y);
+	}
+	val_ckref(x);
+	break;
+}
+
+@ @<Unary bitwise operators@>+=
+case '~':
+	CHK(1);
+	x = stk_pop(r);
+	y = val_un(x, mpz_com, NULL);
+	if (y != NULL)
+		stk_push(r, y);
+	val_ckref(x);
+	break;
+
+@ @<Unary bitwise operators@>+=
+case '#':
+	CHK(1);
+	x = stk_pop(r);
+	if (x->type != V_INT)
+		complain("non-integer value\n");
+	else {
+		y = (x->refcnt == 0) ? x : new_int();
+		if (mpz_cmp_ui(x->u.z, 0) >= 0)
+			mpz_set_ui(y->u.z, mpz_popcount(x->u.z));
+		else
+			mpz_set_si(y->u.z, -1);
+		stk_push(r, y);
+	}
+	val_ckref(x);
+	break;
+
 @*1 Unary operators.
 Unary operations are mostly mathematical functions.
 Let $x$ be the popped value.
@@ -1738,7 +1881,7 @@ c&  \cos x&Borrowed from \.{bc}\cr
 a&  \arctan x&Borrowed from \.{bc}\cr
 l&  \ln x&Borrowed from \.{bc}\cr
 e&  \exp x&Borrowed from \.{bc}\cr
-z&  \zeta(x)&Extension; $\zeta(x)=\sum_{n=1}^\infty {1\over n^x}$\cr
+z&  \zeta(x)&Extension; $\zeta(x)=\sum_{n=1}^\infty {1\over n^x\mathstrut}$\cr
 g&  \Gamma(x)&Extension; $\Gamma(x)=\int_0^\infty t^{x-1}e^{-t}\;dt$\cr
 G&  \ln\Gamma(x)&Extension\cr
 r&  x\hbox{ rounded to integer}&Extension\cr
