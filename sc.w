@@ -1248,7 +1248,9 @@ Note: zero is really a special case because |e==0| for a zero value,
 but we do want one digit before the decimal point.
 
 @<Write digits before...@>=
-if (!special && !mpfr_zero_p(v->u.f) && 0 <= e && (size_t) e <= len)
+if (mpfr_zero_p(v->u.f))
+	e = 1;
+if (!special && 0 <= e && (size_t) e <= len)
 	for (; e; e--)
 		putc(toupper(s[i++]), f);
 else
