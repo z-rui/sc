@@ -2207,6 +2207,7 @@ case 'h':
 		free(r[i].v);
 		free(r[i].a);
 	}
+	mpfr_free_cache();
 }
 
 @* Index.
