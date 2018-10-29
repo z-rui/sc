@@ -1697,6 +1697,8 @@ case '~':
 	x = stk_pop(r);
 	if (x->type != V_INT && y->type != V_INT)
 		complain("non-integer value\n");
+	else if (mpz_cmp_ui(y->u.z, 0) == 0)
+		complain("division by zero\n");
 	else {
 		z = (x->refcnt == 0) ? x : new_int();
 		v = (x != y && y->refcnt == 0) ? y : new_int();
