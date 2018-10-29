@@ -1695,14 +1695,15 @@ case '~':
 
 	y = stk_pop(r);
 	x = stk_pop(r);
-	z = (x->refcnt == 0) ? x : new_int();
-	v = (x != y && y->refcnt == 0) ? y : new_int();
 	if (x->type != V_INT && y->type != V_INT)
 		complain("non-integer value\n");
-	else
+	else {
+		z = (x->refcnt == 0) ? x : new_int();
+		v = (x != y && y->refcnt == 0) ? y : new_int();
 		mpz_tdiv_qr(z->u.z, v->u.z, x->u.z, y->u.z);
-	stk_push(r, z);
-	stk_push(r, v);
+		stk_push(r, z);
+		stk_push(r, v);
+	}
 	val_ckref2(x, y);
 	break;
 
@@ -1718,14 +1719,17 @@ case '|':
 	z = stk_pop(r);
 	y = stk_pop(r);
 	x = stk_pop(r);
-	v = (x->refcnt == 0) ? x : new_int();
 	if (x->type != V_INT || y->type != V_INT || z->type != V_INT)
 		complain("non-integer value\n");
-	else if (mpz_cmp_ui(y->u.z, 0) == 0 || mpz_cmp_ui(z->u.z, 0) == 0)
+	else if (mpz_cmp_ui(y->u.z, 0) < 0)
+		complain("infeasible exponent\n");
+	else if (mpz_cmp_ui(z->u.z, 0) == 0)
 		complain("division by zero\n");
-	else
+	else {
+		v = (x->refcnt == 0) ? x : new_int();
 		mpz_powm(v->u.z, x->u.z, y->u.z, z->u.z);
-	stk_push(r, v);
+		stk_push(r, v);
+	}
 	val_ckref3(x, y, z);
 	break;
 
