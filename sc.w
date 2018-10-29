@@ -2007,6 +2007,10 @@ case ';':
 	if (tok == ':') {
 		CHK(1);
 		x = stk_pop(r);
+		if (!ok || (x->type == V_INT && mpz_cmp_ui(x->u.z, 0) == 0)) {
+			val_ckref(x);
+			x = NULL;
+		}
 		if (ok)
 			*root = bst_set(*root, k, x);
 	} else if (ok) {
