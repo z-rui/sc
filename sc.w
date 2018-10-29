@@ -634,7 +634,9 @@ struct bst *bst_set(struct bst *n, unsigned long k, struct val *v)
 	struct bst *m;
 
 	if (n != NULL && (n = bst_splay(n, k), n->k == k)) {
-		val_unref(n->v);
+		struct val *u;
+
+		u = n->v;
 		if (v == NULL) {
 			if (n->l == NULL)
 				m = n->r;
@@ -646,9 +648,11 @@ struct bst *bst_set(struct bst *n, unsigned long k, struct val *v)
 				m->l = n->l;
 			}
 			free(n);
-			return m;
+			n = m;
+		} else {
+			n->v = val_ref(v);
 		}
-		n->v = val_ref(v);
+		val_unref(u);
 		return n;
 	} else if (v != NULL) {
 		m = malloc(sizeof *m);
@@ -829,6 +833,7 @@ struct lex *lex_push_str(struct lex *top, struct val *v)
 	assert(v->type == V_STR);
 	if (top && !LEX_ISFILE(top) && !*top->s) {
 		l = top;
+		assert(top->u.v->refcnt > 0 || top->u.v != v);
 		val_unref(top->u.v);
 	} else {
 		l = malloc(sizeof *l);
@@ -1567,9 +1572,10 @@ case 'S':
 		if (tok == 'S' || rr->size == 0)
 			stk_push(rr, x);
 		else {
-			if (stk_top(rr, 1) != NULL)
-				val_unref(stk_top(rr, 1));
+			y = stk_top(rr, 1);
 			stk_top(rr, 1) = val_ref(x);
+			if (y != NULL)
+				val_unref(y);
 		}
 	}
 	break;
