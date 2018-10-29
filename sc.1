@@ -3,8 +3,8 @@
 sc \- scientific calculator
 .SH SYNOPSIS
 .B sc
-[\fB\-e\fR \fIexpr\fR]
-[\fB\-f\fR \fIfile\fR]
+[\fB\-e\fR \fIexpr\/\fR]
+[\fB\-f\fR \fIfile\/\fR]
 [\fB\-h\fR]
 [file...]
 .SH DESCRIPTION
@@ -14,11 +14,11 @@ integer and floating point calculations.
 It also has built-in math functions and allows executing macros.
 .SH OPTIONS
 .TP
-.BR \-e " " \fIexpr\fR
-Execute \fIexpr\fR before processing the input.
+.BI "\-e " expr
+Execute \fIexpr\/\fR before processing the input.
 .TP
-.BR \-f " " \fIfile\fR
-Execute \fIfile\fR before processing the input.
+.BI "\-f " file
+Execute \fIfile\/\fR before processing the input.
 If multiple \fB\-e\fR or \fB\-f\fR are given,
 the expressions and files are executed in order.
 .TP
@@ -136,6 +136,43 @@ the first is an integer order and the second is the argument.
 .B y
 Bessel function of the second kind.
 See \fBj\fR.
+.SH Bitwise operations
+Bitwise operations are invoked by command
+.BI & x
+where \fIx\/\fR is a character and is described below.
+.TP
+.B &
+Bitwise and.
+.TP
+.B |
+Bitwise (inclusive) or.
+.TP
+.B ^
+Bitwise exclusive or (XOR).
+.TP
+.B ~
+One's complement.
+.TP
+.B #
+Population count.
+.TP
+.B <
+Left shift.
+.TP
+.B >
+Right shift.
+.TP
+.B s
+Set bit.
+.TP
+.B c
+Clear bit.
+.TP
+.B t
+Toggle bit
+.TP
+.B T
+Test bit.  Pushes 0 or 1 onto the stack depending on the bit status.
 .SH Stack manipulation commands
 .TP
 .B c
@@ -162,7 +199,7 @@ An extra level of execution is introduced when a string is executed
 or the \fB?\fR command is invoked.
 .TP
 .B Q
-Pop a number \fIn\fR from the stack and quit \fIn\fR levels of execution.
+Pop a number \fIn\/\fR from the stack and quit \fIn\/\fR levels of execution.
 It never quits the last level, though.
 .TP
 .B x
@@ -198,17 +235,33 @@ Save the top of the stack to register \fIx\fR,
 overwriting its previous value.
 .TP
 .BI S x
-Similar, but the previous value in register \fIx\fR is preserved
+Similar, but the previous value in register \fIx\/\fR is preserved
 (each register is actually a stack on its own) and can be restored
 by the \fBL\fR command.
 .TP
 .BI l x
-Load the value in register \fIx\fR to the stack.
+Load the value in register \fIx\/\fR to the stack.
 The register is unchanged.
 .TP
 .BI L x
 Similar, but the register is restored to its previous value.
 See \fBS\fR.
+.SH Array commands
+Array commands uses the top of the stack as the index,
+and for the \fB:\fR command, the second of the stack as the value.
+Any integer between 0 and \fIULONG_MAX\/\fR can be used as index.
+All elements in the array are initially zero.
+.PP
+Each array is associated with a register.  The \fBS\fR command
+introduces a new stack level and will thus hide the current array;
+the \fBL\fR command will drop the current array and restore
+the previous array.
+.TP
+.BI : x
+Saves the value to the array.
+.TP
+.BI ; x
+Loads the value from array.
 .SH Parameter commands
 The internal parameters in
 .B sc
@@ -252,3 +305,6 @@ Valid rounding modes are:
 .TP
 .B U
 Query the rounding mode.
+.SH BUGS
+The \fB|\fR operator is inconsistent with \fB%\fR when the dividend is
+a negative number.
