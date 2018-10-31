@@ -1115,6 +1115,9 @@ we can actually use the stock values and thus avoid heap allocations.
 		if (B.len == 1 && isdigit(ch = *B.ptr)) {
 			v = &_stock_int[ch - '0'];
 			rc = 0;
+		} else if (B.len == 1 && isxdigit(ch) && isupper(ch)) {
+			v = &_stock_int[ch - 'A' + 10];
+			rc = 0;
 		} else {
 			v = new_int();
 			rc = mpz_set_str(v->u.z, B.ptr, _ibase);
