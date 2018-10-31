@@ -2,7 +2,7 @@ CC=gcc
 CFLAGS=-Wall -ggdb
 LDFLAGS=
 
-LIBS=-lgmp -lmpfr -lm
+LIBS=-lgmp -lmpfr
 
 # Optimization level
 CFLAGS+=-Os

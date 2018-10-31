@@ -28,8 +28,7 @@ at any precision.
 
 Other than these libraries, this program only requires a standard C library.
 The header files are included here.  To compile, you need the header files
-installed on your machine, and link against the GMP and MPFR libraries
-(and the perhaps math library).
+installed on your machine, and link against the GMP and MPFR libraries.
 
 %define some types from GMP and MPFR
 @s mpz_t int
@@ -49,7 +48,6 @@ installed on your machine, and link against the GMP and MPFR libraries
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
-#include <math.h>
 #include <gmp.h>
 #include <mpfr.h>
 
