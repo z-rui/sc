@@ -167,6 +167,19 @@ struct val {
 	} u;
 };
 
+
+@ To avoid allocations for usual values, we define a few stock values.
+@c
+const mp_limb_t _stock_limbs[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+#define __(i, j) @[{1, V_INT, {MPZ_ROINIT_N((mp_limb_t *) &_stock_limbs[i], j)}}@]
+#define _(i) @[__(i, 1)@]
+struct val _stock_int[] = {
+	__(0,0), _(1), _(2), _(3), _(4), _(5), _(6), _(7),
+	_(8), _(9), _(10), _(11), _(12), _(13), _(14), _(15)
+};
+#undef _
+#undef __
+
 @ Function |val_ref| increments the reference count.
 The reference count is only incremented when the value is inserted into
 other structures (stack, array, etc.).
@@ -1092,15 +1105,22 @@ while (isdigit(ch) || (isxdigit(ch) && isupper(ch))) {
 	ch = lex_getc(l);
 }
 
-@ @<Return a numeric value@>=
+@ For one-digit numbers (which are common),
+we can actually use the stock values and thus avoid heap allocations.
+@<Return a numeric value@>=
 {
 	struct val *v;
 	int rc;
 
 	buf_fin(&B);
 	if (isint) {
-		v = new_int();
-		rc = mpz_set_str(v->u.z, B.ptr, (B.len == 1) ? 16 : _ibase);
+		if (B.len == 1 && isdigit(ch = *B.ptr)) {
+			v = &_stock_int[ch - '0'];
+			rc = 0;
+		} else {
+			v = new_int();
+			rc = mpz_set_str(v->u.z, B.ptr, _ibase);
+		}
 	} else {
 		v = new_fp(_precision);
 		rc = mpfr_set_str(v->u.f, B.ptr, _ibase, _rnd_mode);
