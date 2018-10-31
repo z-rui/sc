@@ -5,18 +5,20 @@ LDFLAGS=
 LIBS=-lgmp -lmpfr
 
 # Optimization level
-CFLAGS+=-Os
 #CFLAGS+=-DNDEBUG
+CFLAGS+=-O2
 CFLAGS+=-fwhole-program
 
-# Sanitize
-#CFLAGS+=-fsanitize=address -fsanitize=leak
-#LDFLAGS+=-fsanitize=address -fsanitize=leak
+CFLAGS+=$(MYCFLAGS)
+LDFLAGS+=$(MYLDFLAGS)
 
-all: sc sc.pdf
+all: sc.pdf sc
 
 %: %.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 %.pdf: %.dvi
 	dvipdfm $<
@@ -34,3 +36,4 @@ clean:
 	rm -f sc.{o,c,tex,dvi,idx,scn,log,toc}
 
 .PHONY: all clean
+.SUFFIXES:
