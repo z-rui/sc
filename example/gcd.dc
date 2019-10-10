@@ -1,0 +1,6 @@
+# interactively read two numbers and
+# print the greatest common divisor of them.
+[a=]P?Sa
+[b=]P?Sb
+[lbLaLb%SbSalb0<G]sG
+lb0<G[gcd(a,b)=]PLap

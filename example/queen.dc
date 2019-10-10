@@ -1,0 +1,19 @@
+# Read an integer n
+# Print a configuration of n queens on n x n board without conflictions.
+
+? sN
+
+[q]sq
+[[ ]P1-d0<p]sp
+[d;b d0<p[Q
+]Ps. 1+dlN>P]sP
+[0dlN>P999Q]s#     # Found a solution
+
+[lilN=#0dlN>rs.]sR  # Recursive search
+[l@x1+dlN>r]sr
+[d;c1=q dli+;a1=q dli-lN+;d1=q
+dli:b dli+1r:a dli-lN+1r:d d1r:c
+Li1+Si lRx Li1-Si
+d0r:c dli-lN+0r:d dli+0r:a]s@
+
+0silRx

@@ -1,0 +1,6 @@
+# output the exponential moving average of the input
+# y(n) = (1-a)*y(n-1) + a*x(n)
+
+.283468689426211sa # time constant = 3
+[q]sq[?z0=qly-la*Ly+pSylxx]sx
+0.sylxx

@@ -1,0 +1,8 @@
+# Read an integer n
+# Print all prime numbers in 1..n
+
+?1+sN
+[d;@0=yd0r:@1+dlN>x]sx
+[pdd*dlN>zs.]sy
+[d1r:@S.dL.+dlN>z]sz
+2dlN>x

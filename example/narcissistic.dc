@@ -1,0 +1,5 @@
+# Find all narcissistic numbers
+# i.e., (a,b,c) where a^3+b^3+c^3 = 100a+10b+c
+
+[lnn10P]sP[la3^lb3^+lc3^+la10*lb+10*lc+dsn=PLc1+dSc10>C]sC
+[0sclCxLb1+dSb10>B]sB[0sblBxLa1+dSa10>A]dsA1sax
