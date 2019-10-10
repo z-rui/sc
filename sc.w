@@ -40,6 +40,7 @@ installed on your machine, and link against the GMP and MPFR libraries.
 @s mpfr_rnd_t int
 @s mp_limb_t int
 
+@d SC_VERSION "1.0.0"
 @c
 #include <ctype.h>
 #include <stdio.h>
@@ -2190,28 +2191,30 @@ void exec_file(FILE *f, struct stk r[])
 
 
 @ @<Process command line arguments@>=
-progname = *argv++;
-
-while (*argv && **argv == '-') {
+for (progname = *argv++; *argv && **argv == '-'; ++argv) {
 	int ch;
 	switch (ch = (*argv)[1]) {
 	@<Command line options@>;
 	}
 }
 
-@ @<Command line options@>+=
+@ The \.{-e} and \.{-f} options executes commands from the command line argument
+or from a file.  If \.{-e} is specified, the standard input won't be read for
+commands (mimicking the behavior of \.{dc}).
+@<Command line options@>+=
 case 'e':
 case 'f':
 {
 	char *arg;
 	size_t len;
 
-	arg = (*argv++) + 2;
-	if (*arg == '\0' && (arg = *argv++) == NULL)
-		complain("missing argument for %s\n", (--argv)[-1]);
-	else if (ch == 'f')
+	arg = *argv + 2;
+	if (*arg == '\0' && (arg = *++argv) == NULL) {
+		complain("missing argument for %s\n", *--argv);
+		goto option_error;
+	} else if (ch == 'f') {
 		exec_file(fopen(arg, "r"), r);
-	else {
+	} else {
 		read_stdin = 0;
 		len = strlen(arg);
 		interpret(lex_push_str(NULL,
@@ -2220,20 +2223,34 @@ case 'f':
 	break;
 }
 
-@ @<Command line options@>+=
+@ Option \.{-h} shows the usage.  If any unrecognized options are present,
+print an error message, and then show the usage.
+@<Command line options@>+=
 default:
 	complain("unknown option %s\n", *argv);
+option_error:
 	rc = 1;
 	/* fall through */
 case 'h':
-	printf("Usage: %s [-efh] [file...]\n"@|
+	printf("Usage: %s [-efhV] [file...]\n"@|
 		"  -e expr   execute expr\n"@|
 		"  -f file   execute file\n"@|
-		"  -h        print help\n",
+		"  -h        print help\n"@|
+		"  -V        show version information\n",
 		progname);
 	return rc;
 
-@ @<Clean up registers...@>=
+@ Option \.{-V} prints version information.
+@<Command line options@>+=
+case 'V':
+	printf("sc " SC_VERSION " (GMP %s, MPFR %s)\n"
+		"Copyright 2018-2019 zr.\n",
+		gmp_version,
+		mpfr_version);
+	return rc;
+
+@ At program exit, we clean up everything.  The leak detector should be happy.
+@<Clean up registers...@>=
 {
 	int i;
 	struct val *v;
