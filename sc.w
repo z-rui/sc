@@ -1486,6 +1486,7 @@ case 'x':
 as indicated by the line.
 
 @<Actions...@>+=
+#ifndef NO_SHELL_ESCAPE	/* \.{!} has security issues */
 case '!':
 {
 	struct buf B;
@@ -1500,6 +1501,7 @@ case '!':
 	buf_free(&B);
 	break;
 }
+#endif
 
 @ The \.{\#} command skips tokens until the end of the line.
 It is usually used for comments.
