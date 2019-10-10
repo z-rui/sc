@@ -137,7 +137,6 @@ int _ibase = 10, _obase = 10; /* input/output base */
 mpfr_prec_t _precision = 53; /* floating point precision */
 mpfr_rnd_t _rnd_mode = MPFR_RNDN; /* rounding mode */
 
-
 @* Types and values.
 There are three data types in this program:
 \item{$\bullet$} Integers;
@@ -1341,7 +1340,7 @@ case ' ': case '\t': case '\v': case '\f':
 case '\r':
 	break; /* no action */
 
-@ When a valid is read (|tok == '\0'|), push it onto the stack.
+@ When a value is read (|tok == '\0'|), push it onto the stack.
 @<Actions...@>+=
 case '\0':
 	stk_push(r, v);
